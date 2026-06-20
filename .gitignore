@@ -1,0 +1,45 @@
+# ---- Node / frontend ----
+node_modules/
+dist/
+dist-ssr/
+coverage/
+*.local
+.vite/
+*.tsbuildinfo
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Keep the lockfile TRACKED (CI uses --frozen-lockfile) — do not ignore pnpm-lock.yaml
+.pnpm-store/
+
+# ---- Rust / Tauri ----
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# ---- Environment / secrets ----
+.env
+.env.*
+!.env.example
+
+# ---- Claude Code (personal, not shared) ----
+# Shared config (.claude/settings.json, .claude/rules/) IS committed.
+.claude/settings.local.json
+CLAUDE.local.md
+
+# ---- Editors ----
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+
+# ---- OS cruft ----
+.DS_Store
+Thumbs.db
+desktop.ini

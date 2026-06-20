@@ -1,0 +1,25 @@
+# Normalize line endings: the repo stores source with LF, regardless of OS.
+# This keeps diffs clean across a Windows/macOS/Linux team.
+* text=auto eol=lf
+
+# Windows-only scripts keep CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets — never normalize
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+
+# CRITICAL: test fixtures for the §7.1 line-ending / encoding round-trip tests
+# must NOT be normalized by git, or a CRLF fixture would silently become LF
+# (and a BOM fixture would lose its BOM) on checkout, making the test meaningless.
+# NOTE: prefer constructing CRLF/BOM inputs as raw byte literals inside the test
+# (most robust); this rule is belt-and-suspenders if you use fixture files.
+src-tauri/tests/fixtures/** -text
