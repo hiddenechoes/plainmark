@@ -1,6 +1,0 @@
-# pnpm 10+ blocks dependency build scripts by default. esbuild (pulled in by
-# Vite) ships a prebuilt binary and only needs its install script to link it.
-# Approving it keeps `pnpm install --frozen-lockfile` and every `pnpm <script>`
-# run (which verifies deps first) from failing on "ignored build scripts" in CI.
-allowBuilds:
-  esbuild: true
