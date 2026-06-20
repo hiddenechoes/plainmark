@@ -1,5 +1,5 @@
 <!-- Update <your-org> to your GitHub org/user once the repo exists. -->
-![CI](https://github.com/<your-org>/plainmark/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/hiddenechoes/plainmark/actions/workflows/ci.yml/badge.svg)
 
 # plainmark
 
