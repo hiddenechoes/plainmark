@@ -26,7 +26,7 @@ jobs:
       # pnpm/action-setup@v4 needs a version: it reads package.json "packageManager"
       # (e.g. "packageManager": "pnpm@9.x"). Ensure that field exists.
       - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: pnpm
@@ -63,7 +63,7 @@ jobs:
             libappindicator3-dev librsvg2-dev patchelf
 
       - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: pnpm
