@@ -1,8 +1,12 @@
 name: CI
 
 on:
+  # Run on direct pushes to main (the final merge commit) and on every PR.
+  # `dev` is intentionally NOT in `push`: PRs already cover it (feature->dev and
+  # dev->main both fire `pull_request`), so listing it here only double-ran CI on
+  # the dev->main PR's head commit.
   push:
-    branches: [main, dev]
+    branches: [main]
   pull_request:
     branches: [main, dev]
 
