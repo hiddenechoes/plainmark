@@ -53,9 +53,10 @@ export function readNote(path: string): Promise<NoteFile> {
 }
 
 /** Save a note atomically, preserving its line endings and BOM. Passes the
- * note's read-time token so the backend rejects a blind clobber (§7.1). */
-export function saveNote(path: string, note: NoteFile): Promise<void> {
-  return invoke<void>("save_note", {
+ * note's read-time token so the backend rejects a blind clobber (§7.1), and
+ * returns the new on-disk token to refresh the buffer. */
+export function saveNote(path: string, note: NoteFile): Promise<string> {
+  return invoke<string>("save_note", {
     path,
     content: note.content,
     eol: note.eol,

@@ -458,7 +458,7 @@ fn save_note(
     bom: bool,
     base_token: Option<String>,
     state: State<'_, VaultState>,
-) -> AppResult<()> {
+) -> AppResult<String> {
     let target = resolve_in_vault(&state, &path)?;
     fs_ops::guard_unchanged(&target, base_token.as_deref())?;
     fs_ops::save_note(&target, &content, &eol, bom)

@@ -80,6 +80,21 @@ button:hover {
   white-space: pre-wrap;
 }
 
+/* "Changed underneath you" prompt (SPEC §4.1 / §7.1 no-blind-clobber). */
+.banner.conflict {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #3a311d;
+  color: #e6c982;
+  border-bottom: 1px solid var(--border);
+}
+
+.banner.conflict .spacer {
+  flex: 1;
+}
+
 .empty-state {
   flex: 1;
   display: flex;

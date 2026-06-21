@@ -138,8 +138,10 @@ pub fn read_note(path: &Path) -> AppResult<NoteFile> {
 }
 
 /// Save editor `content` (LF-normalized) back to disk, restoring the original
-/// `eol` style and `bom` so only the intended text changes (SPEC §7.1).
-pub fn save_note(path: &Path, content: &str, eol: &str, bom: bool) -> AppResult<()> {
+/// `eol` style and `bom` so only the intended text changes (SPEC §7.1). Returns
+/// the new on-disk token, so the editor can refresh it and a subsequent save
+/// doesn't wrongly trip the no-blind-clobber guard.
+pub fn save_note(path: &Path, content: &str, eol: &str, bom: bool) -> AppResult<String> {
     let normalized = content.replace("\r\n", "\n");
     let bodied = if eol == "crlf" {
         normalized.replace('\n', "\r\n")
@@ -154,7 +156,7 @@ pub fn save_note(path: &Path, content: &str, eol: &str, bom: bool) -> AppResult<
     bytes.extend_from_slice(bodied.as_bytes());
 
     atomic_write(path, &bytes)?;
-    Ok(())
+    Ok(content_hash(&bytes))
 }
 
 /// Vault-local settings (`.plainmark/settings.json`). Phase 1 only reads the
