@@ -1,0 +1,195 @@
+:root {
+  --bg: #1e1e1e;
+  --bg-elev: #252526;
+  --bg-side: #1b1b1b;
+  --fg: #d4d4d4;
+  --fg-dim: #9a9a9a;
+  --accent: #4ea1ff;
+  --border: #333;
+  --danger: #ff6b6b;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+  font-size: 14px;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  font-weight: 600;
+}
+
+.vault-path {
+  color: var(--fg-dim);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--accent);
+}
+
+.banner.error {
+  padding: 8px 12px;
+  background: #3a1d1d;
+  color: var(--danger);
+  border-bottom: 1px solid var(--border);
+  white-space: pre-wrap;
+}
+
+.empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  color: var(--fg-dim);
+}
+
+.workspace {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.sidebar {
+  width: 260px;
+  flex-shrink: 0;
+  overflow: auto;
+  padding: 8px;
+  background: var(--bg-side);
+  border-right: 1px solid var(--border);
+}
+
+.tree,
+.tree ul {
+  list-style: none;
+  margin: 0;
+  padding-left: 0;
+}
+
+.tree ul {
+  padding-left: 14px;
+}
+
+.tree-folder {
+  display: block;
+  padding: 3px 6px;
+  color: var(--fg-dim);
+  font-weight: 600;
+}
+
+.tree-file {
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  padding: 3px 6px;
+  border-radius: 4px;
+}
+
+.tree-file:hover {
+  background: var(--bg-elev);
+}
+
+.tree-file.selected {
+  background: var(--accent);
+  color: #06243f;
+}
+
+.tree-empty {
+  color: var(--fg-dim);
+  padding: 8px 6px;
+}
+
+.editor-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.editor-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  border-bottom: 1px solid var(--border);
+}
+
+.editor-status .spacer {
+  flex: 1;
+}
+
+.editor-status .dirty {
+  color: var(--accent);
+}
+
+.editor-status .saved {
+  color: #6cc070;
+}
+
+.editor-placeholder {
+  padding: 16px;
+  color: var(--fg-dim);
+}
+
+.editor-host {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.editor-host .cm-editor {
+  height: 100%;
+}
+
+.editor-host .cm-scroller {
+  font-family: ui-monospace, "SFMono-Regular", "Cascadia Code", Menlo, monospace;
+}
