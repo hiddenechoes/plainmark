@@ -9,23 +9,28 @@
 mod config;
 mod error;
 mod fs_ops;
+mod watcher;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 
 use error::{AppError, AppResult};
 use fs_ops::{NoteFile, SavedAttachment, TreeNode};
+use watcher::VaultWatcher;
 
 /// The currently open vault root. `None` until the user opens a vault.
+/// `watcher` keeps the active file watcher alive (dropping it stops watching);
+/// re-opening a vault replaces it.
 #[derive(Default)]
 struct VaultState {
     root: Mutex<Option<PathBuf>>,
+    watcher: Mutex<Option<VaultWatcher>>,
 }
 
 /// Returned to the frontend after opening a vault.
@@ -58,10 +63,41 @@ fn open_vault_at(
         .lock()
         .map_err(|_| AppError::Io("vault state lock poisoned".into()))? = Some(root.clone());
 
+    start_watcher(app, state, &root)?;
+
     Ok(VaultInfo {
         root: root.to_string_lossy().to_string(),
         tree,
     })
+}
+
+/// Start watching `root` and forward each change to the webview as a
+/// `note://changed` event (drives external-change handling, §4.1). The watcher is
+/// stored in `VaultState` so it lives as long as the vault is open. A failure to
+/// start the watcher is non-fatal: the vault still opens, just without live
+/// updates.
+fn start_watcher(app: &tauri::AppHandle, state: &VaultState, root: &Path) -> AppResult<()> {
+    let config = watcher::load_watch_config(root);
+    let app_handle = app.clone();
+    let started = VaultWatcher::start(root, config, move |batch| {
+        for ev in batch {
+            // If the webview has gone away the emit just fails; nothing to do.
+            let _ = app_handle.emit("note://changed", ev);
+        }
+    });
+
+    match started {
+        Ok(w) => {
+            *state
+                .watcher
+                .lock()
+                .map_err(|_| AppError::Io("watcher state lock poisoned".into()))? = Some(w);
+        }
+        Err(e) => {
+            eprintln!("plainmark: file watcher failed to start: {e}");
+        }
+    }
+    Ok(())
 }
 
 fn resolve_in_vault(state: &VaultState, path: &str) -> AppResult<PathBuf> {

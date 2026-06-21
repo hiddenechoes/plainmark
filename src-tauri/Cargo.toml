@@ -24,6 +24,10 @@ thiserror = "2"
 base64 = "0.22"
 tauri-plugin-clipboard-manager = "2"
 png = "0.17"
+# Phase 2: filesystem watcher (native events + polling fallback) with built-in
+# debouncing and rename-pair correlation (SPEC §13).
+notify = "8"
+notify-debouncer-full = "0.5"
 
 [dev-dependencies]
 tempfile = "3"
