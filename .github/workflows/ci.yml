@@ -1,8 +1,12 @@
 name: CI
 
 on:
+  # Run on direct pushes to main (the final merge commit) and on every PR.
+  # `dev` is intentionally NOT in `push`: PRs already cover it (feature->dev and
+  # dev->main both fire `pull_request`), so listing it here only double-ran CI on
+  # the dev->main PR's head commit.
   push:
-    branches: [main, dev]
+    branches: [main]
   pull_request:
     branches: [main, dev]
 
@@ -11,6 +15,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Cheap gate (~10s) that decides whether the expensive cross-platform build
+  # needs to run. Denylist by design: `build` is true for ANY change EXCEPT a
+  # docs-only one, so a forgotten or new code path still builds — the safe
+  # failure mode is "run", never "silently skip". To exempt a new docs-like
+  # path, add another `!` exclusion below.
+  changes:
+    name: Detect code changes
+    runs-on: ubuntu-22.04
+    outputs:
+      build: ${{ steps.filter.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            build:
+              - '**'
+              - '!**/*.md'
+              - '!docs/**'
+              - '!LICENSE'
+              - '!.claude/**'
+              - '!.github/dependabot.yml'
+
   checks:
     name: Static checks (lint, types, format, clippy)
     runs-on: ubuntu-22.04
@@ -47,6 +75,11 @@ jobs:
 
   build-and-test:
     name: Build & test (${{ matrix.platform }})
+    # Skipped on docs-only changes. A job skipped via `if:` is treated as passing
+    # by branch protection (unlike a workflow-level `paths:` filter, which never
+    # reports and would block a required check), so this stays merge-safe.
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
     strategy:
       fail-fast: false
       matrix:

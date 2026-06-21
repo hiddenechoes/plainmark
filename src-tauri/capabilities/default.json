@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimal, default-deny capability. The webview gets only core defaults; every filesystem operation (folder picker, tree, read, atomic write) is a Rust command — no FS or network capability is granted to the frontend.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
