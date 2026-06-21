@@ -22,46 +22,42 @@ const imageCache = new Map<string, string>();
 
 function PreviewImage({ src, alt, isWiki }: { src: string; alt: string; isWiki: boolean }) {
   const loc = useContext(LocationContext);
-  const [dataUrl, setDataUrl] = useState<string | null>(() =>
-    src.startsWith("data:") ? src : null,
+  // Data URLs are self-contained, and remote URLs are never fetched (offline
+  // guarantee), so both outcomes derive from the props during render. Only a
+  // resolvable vault path needs an async load from the backend.
+  const isData = src.startsWith("data:");
+  const abs = useMemo(
+    () => (isData || !loc ? null : resolveImagePath(loc, src, isWiki)),
+    [isData, loc, src, isWiki],
   );
-  const [failed, setFailed] = useState(false);
+  // The cache is a plain module-level Map, so a hit is read during render — no
+  // effect or extra state needed.
+  const cachedUrl = abs ? (imageCache.get(abs) ?? null) : null;
+  // Async load outcome, tagged with the `abs` it belongs to so a result from a
+  // previous image is ignored once `src` changes (a null url means it failed).
+  const [loaded, setLoaded] = useState<{ abs: string; url: string | null } | null>(null);
 
   useEffect(() => {
-    if (src.startsWith("data:")) {
-      setDataUrl(src);
-      return;
-    }
-    if (!loc) return;
-    const abs = resolveImagePath(loc, src, isWiki);
-    if (!abs) {
-      // Remote URLs and the like are not fetched (offline guarantee).
-      setFailed(true);
-      return;
-    }
-    const cached = imageCache.get(abs);
-    if (cached) {
-      setDataUrl(cached);
-      setFailed(false);
-      return;
-    }
+    if (!abs || imageCache.has(abs)) return;
     let active = true;
     readImage(abs)
       .then((url) => {
         if (!active) return;
         imageCache.set(abs, url);
-        setDataUrl(url);
-        setFailed(false);
+        setLoaded({ abs, url });
       })
       .catch(() => {
-        if (active) setFailed(true);
+        if (active) setLoaded({ abs, url: null });
       });
     return () => {
       active = false;
     };
-  }, [src, isWiki, loc]);
+  }, [abs]);
 
-  if (failed || !dataUrl) {
+  const dataUrl = isData ? src : (cachedUrl ?? (loaded?.abs === abs ? loaded.url : null));
+  if (!dataUrl) {
+    // Covers not-yet-loaded, load failures, and unresolvable refs such as
+    // remote URLs (never fetched — offline guarantee).
     return <span className="img-missing">{alt || src}</span>;
   }
   return <img className="preview-img" src={dataUrl} alt={alt} />;
