@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { BacklinksPanel } from "./components/BacklinksPanel";
 import { Editor } from "./components/Editor";
 import { FileTree } from "./components/FileTree";
 import { Preview } from "./components/Preview";
@@ -200,6 +201,7 @@ export function App() {
               selectedPath={open?.path ?? null}
               onSelect={(path) => void handleSelect(path)}
             />
+            <BacklinksPanel notePath={open?.path ?? null} onNavigate={handleNavigate} />
           </aside>
           <main className="editor-pane">
             {open ? (
