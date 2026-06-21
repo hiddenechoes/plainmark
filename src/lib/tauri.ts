@@ -60,9 +60,17 @@ export interface SavedAttachment {
   relativePath: string;
 }
 
-/** Save a pasted/dropped image (base64) into the vault's attachments folder. */
-export function saveAttachment(dataBase64: string, ext: string): Promise<SavedAttachment> {
-  return invoke<SavedAttachment>("save_attachment", { dataBase64, ext });
+/** Save an image from the system clipboard into the vault's attachments folder.
+ * Resolves to `null` if the clipboard holds no image (so a text paste is left
+ * untouched). Reading the clipboard in Rust is far more reliable than the
+ * webview's `paste` event, especially on Linux/WebKitGTK. */
+export function saveClipboardImage(): Promise<SavedAttachment | null> {
+  return invoke<SavedAttachment | null>("save_clipboard_image");
+}
+
+/** Copy a dropped image file (by absolute source path) into the vault. */
+export function importAttachment(sourcePath: string): Promise<SavedAttachment> {
+  return invoke<SavedAttachment>("import_attachment", { sourcePath });
 }
 
 /** Read an image inside the vault as a `data:` URL for the preview pane. */

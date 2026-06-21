@@ -4,10 +4,11 @@ import { FileTree } from "./components/FileTree";
 import { Preview } from "./components/Preview";
 import { basename, relativeTo } from "./lib/path";
 import {
+  importAttachment,
   loadLastVault,
   pickVault,
   readNote,
-  saveAttachment,
+  saveClipboardImage,
   saveNote,
   type NoteFile,
   type VaultInfo,
@@ -93,10 +94,16 @@ export function App() {
     }
   }, [open]);
 
-  // Persist a pasted/dropped image and report its vault-relative path; the
-  // editor inserts the embed and the note becomes dirty (saved on Cmd/Ctrl+S).
-  const handleSaveImage = useCallback(async (dataBase64: string, ext: string) => {
-    const { relativePath } = await saveAttachment(dataBase64, ext);
+  // Paste: read an image from the system clipboard; null means "no image, let
+  // the text paste proceed". The editor inserts the embed at the cursor.
+  const handlePasteImage = useCallback(async () => {
+    const saved = await saveClipboardImage();
+    return saved ? saved.relativePath : null;
+  }, []);
+
+  // Drop: copy the dropped image file into the vault and report its path.
+  const handleImportImage = useCallback(async (sourcePath: string) => {
+    const { relativePath } = await importAttachment(sourcePath);
     return relativePath;
   }, []);
 
@@ -166,7 +173,8 @@ export function App() {
                     key={open.path}
                     doc={open.note.content}
                     onChange={handleChange}
-                    onSaveImage={handleSaveImage}
+                    onPasteImage={handlePasteImage}
+                    onImportImage={handleImportImage}
                     onError={setError}
                   />
                   {showPreview && (

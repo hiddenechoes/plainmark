@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::Engine as _;
 use serde::Serialize;
 use tauri::{Manager, State};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 
 use error::{AppError, AppResult};
@@ -145,19 +145,9 @@ fn save_note(
     fs_ops::save_note(&target, &content, &eol, bom)
 }
 
-/// Save a pasted/dropped image into the vault's attachments folder. The webview
-/// hands over base64 bytes (it never touches the FS); we decode and write
-/// atomically (§7.1, §8.9), returning the vault-relative path for the embed.
-#[tauri::command]
-fn save_attachment(
-    data_base64: String,
-    ext: String,
-    state: State<'_, VaultState>,
-) -> AppResult<SavedAttachment> {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(data_base64.as_bytes())
-        .map_err(|e| AppError::InvalidPath(format!("invalid image data: {e}")))?;
-
+/// Write image `bytes` into the active vault's attachments folder. Shared by the
+/// clipboard-paste and file-drop paths.
+fn save_image_bytes(state: &VaultState, bytes: &[u8], ext: &str) -> AppResult<SavedAttachment> {
     let guard = state
         .root
         .lock()
@@ -168,7 +158,56 @@ fn save_attachment(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    fs_ops::save_attachment(root, &bytes, &ext, now_millis)
+    fs_ops::save_attachment(root, bytes, ext, now_millis)
+}
+
+/// Encode raw RGBA pixels as a PNG (the clipboard hands us pixels, not a file).
+fn encode_png(rgba: &[u8], width: u32, height: u32) -> AppResult<Vec<u8>> {
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| AppError::Io(e.to_string()))?;
+        writer
+            .write_image_data(rgba)
+            .map_err(|e| AppError::Io(e.to_string()))?;
+    }
+    Ok(out)
+}
+
+/// Save an image from the system clipboard into the vault (the reliable
+/// cross-platform paste path; the webview's clipboard often lacks image bytes,
+/// especially on Linux/WebKitGTK). Returns `None` when the clipboard holds no
+/// image, so a plain-text paste falls through to the editor unchanged.
+#[tauri::command]
+fn save_clipboard_image(
+    app: tauri::AppHandle,
+    state: State<'_, VaultState>,
+) -> AppResult<Option<SavedAttachment>> {
+    let Ok(image) = app.clipboard().read_image() else {
+        return Ok(None);
+    };
+    let png = encode_png(image.rgba(), image.width(), image.height())?;
+    Ok(Some(save_image_bytes(&state, &png, "png")?))
+}
+
+/// Copy a dropped image file into the vault's attachments folder (§8.9). The
+/// source path comes from Tauri's native drag-drop event; we read it once and
+/// write a vault-scoped copy atomically.
+#[tauri::command]
+fn import_attachment(
+    source_path: String,
+    state: State<'_, VaultState>,
+) -> AppResult<SavedAttachment> {
+    let bytes = std::fs::read(&source_path)?;
+    let ext = Path::new(&source_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("png");
+    save_image_bytes(&state, &bytes, ext)
 }
 
 /// Read an image inside the active vault and return it as a `data:` URL for the
@@ -182,6 +221,7 @@ fn read_image(path: String, state: State<'_, VaultState>) -> AppResult<String> {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(VaultState::default())
         .invoke_handler(tauri::generate_handler![
             pick_vault,
@@ -189,7 +229,8 @@ fn main() {
             refresh_tree,
             read_note,
             save_note,
-            save_attachment,
+            save_clipboard_image,
+            import_attachment,
             read_image
         ])
         .run(tauri::generate_context!())

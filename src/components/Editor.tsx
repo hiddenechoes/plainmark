@@ -1,86 +1,99 @@
 import { useEffect, useRef } from "react";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { createEditorExtensions } from "../lib/editor/setup";
-import { fileToBase64, imageExt, imageFilesFrom } from "../lib/image";
+import { isImagePath } from "../lib/image";
 
 interface EditorProps {
   /** Initial document. The editor is remounted (via React `key`) per file, so
    * this is read once at mount and not treated as a live prop afterwards. */
   doc: string;
   onChange: (doc: string) => void;
-  /** Persist a pasted/dropped image; returns the vault-relative path to embed. */
-  onSaveImage?: (dataBase64: string, ext: string) => Promise<string>;
+  /** Read an image from the system clipboard; resolves to the vault-relative
+   * path to embed, or `null` if the clipboard holds no image. */
+  onPasteImage?: () => Promise<string | null>;
+  /** Copy a dropped image file (absolute source path) into the vault; resolves
+   * to the vault-relative path to embed. */
+  onImportImage?: (sourcePath: string) => Promise<string>;
   /** Surface a backend error (e.g. an image write that failed). */
   onError?: (message: string) => void;
 }
 
-export function Editor({ doc, onChange, onSaveImage, onError }: EditorProps) {
+export function Editor({ doc, onChange, onPasteImage, onImportImage, onError }: EditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   // Capture the initial doc and keep the latest callbacks without re-creating
   // the editor (which would reset the cursor on every keystroke).
   const initialDocRef = useRef(doc);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
-  const onSaveImageRef = useRef(onSaveImage);
-  onSaveImageRef.current = onSaveImage;
+  const onPasteImageRef = useRef(onPasteImage);
+  onPasteImageRef.current = onPasteImage;
+  const onImportImageRef = useRef(onImportImage);
+  onImportImageRef.current = onImportImage;
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
+
+    const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+    const insertEmbed = (view: EditorView, relativePath: string) => {
+      view.dispatch(view.state.replaceSelection(`![[${relativePath}]]`));
+    };
+
+    // Paste: the webview's clipboard rarely carries image bytes (notably on
+    // Linux/WebKitGTK), so we ask Rust to read the system clipboard. A text
+    // paste returns null and proceeds through CodeMirror unchanged (§8.9).
+    const pasteHandler = EditorView.domEventHandlers({
+      paste: (_event, view) => {
+        const read = onPasteImageRef.current;
+        if (!read) return false;
+        void read()
+          .then((relativePath) => {
+            if (relativePath) insertEmbed(view, relativePath);
+          })
+          .catch((e) => onErrorRef.current?.(message(e)));
+        return false;
+      },
+    });
+
     const view = new EditorView({
       state: EditorState.create({
         doc: initialDocRef.current,
-        extensions: createEditorExtensions((d) => onChangeRef.current(d)),
+        extensions: [...createEditorExtensions((d) => onChangeRef.current(d)), pasteHandler],
       }),
       parent: host,
     });
     view.focus();
 
-    // Image paste/drop: hand bytes to Rust, then insert an `![[...]]` embed at
-    // the selection (SPEC §8.9). The dispatch flows through the normal change
-    // path, so the note becomes dirty and saves atomically like any edit.
-    const insertImages = async (files: File[]) => {
-      const save = onSaveImageRef.current;
-      if (!save) return;
-      for (const file of files) {
-        try {
-          const relativePath = await save(await fileToBase64(file), imageExt(file));
-          view.dispatch(view.state.replaceSelection(`![[${relativePath}]]`));
-        } catch (e) {
-          onErrorRef.current?.(e instanceof Error ? e.message : String(e));
+    // Drag-drop: Tauri intercepts OS file drops at the window level, so the
+    // HTML5 `drop` event never fires. Use the native drag-drop event, which
+    // gives file paths, and copy each image into the vault via Rust (§8.9).
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        if (event.payload.type !== "drop") return;
+        const importImage = onImportImageRef.current;
+        if (!importImage) return;
+        for (const path of event.payload.paths) {
+          if (!isImagePath(path)) continue;
+          void importImage(path)
+            .then((relativePath) => insertEmbed(view, relativePath))
+            .catch((e) => onErrorRef.current?.(message(e)));
         }
-      }
-    };
-
-    const onPaste = (e: ClipboardEvent) => {
-      const files = imageFilesFrom(e.clipboardData);
-      if (files.length === 0) return;
-      e.preventDefault();
-      void insertImages(files);
-    };
-    const onDrop = (e: DragEvent) => {
-      const files = imageFilesFrom(e.dataTransfer);
-      if (files.length === 0) return;
-      e.preventDefault();
-      void insertImages(files);
-    };
-    const onDragOver = (e: DragEvent) => {
-      if (Array.from(e.dataTransfer?.items ?? []).some((i) => i.kind === "file")) {
-        e.preventDefault();
-      }
-    };
-
-    view.dom.addEventListener("paste", onPaste);
-    view.dom.addEventListener("drop", onDrop);
-    view.dom.addEventListener("dragover", onDragOver);
+      })
+      .then((un) => {
+        if (cancelled) un();
+        else unlisten = un;
+      })
+      .catch((e) => onErrorRef.current?.(message(e)));
 
     return () => {
-      view.dom.removeEventListener("paste", onPaste);
-      view.dom.removeEventListener("drop", onDrop);
-      view.dom.removeEventListener("dragover", onDragOver);
+      cancelled = true;
+      unlisten?.();
       view.destroy();
     };
   }, []);
