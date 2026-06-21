@@ -4,13 +4,17 @@ import { FileTree } from "./components/FileTree";
 import { Preview } from "./components/Preview";
 import { basename, relativeTo } from "./lib/path";
 import {
+  createNote,
   importAttachment,
+  listLinkTargets,
   loadLastVault,
+  onIndexUpdated,
   pickVault,
   readNote,
   saveClipboardImage,
   saveNote,
   type NoteFile,
+  type NoteMeta,
   type VaultInfo,
 } from "./lib/tauri";
 import "./styles.css";
@@ -38,6 +42,7 @@ export function App() {
   const [status, setStatus] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [showPreview, setShowPreview] = useState(true);
+  const [targets, setTargets] = useState<NoteMeta[]>([]);
 
   const previewContent = useDebounced(open?.note.content ?? "", 200);
 
@@ -76,6 +81,51 @@ export function App() {
       setError(String(e));
     }
   }, []);
+
+  // Keep the link-target snapshot fresh: load it when a vault opens and refresh
+  // whenever the index changes (create/edit/delete/rename, in-app or external).
+  useEffect(() => {
+    if (!vault) return;
+    let active = true;
+    const load = () => {
+      listLinkTargets()
+        .then((t) => {
+          if (active) setTargets(t);
+        })
+        .catch(() => {});
+    };
+    load();
+    const unlisten = onIndexUpdated(load);
+    return () => {
+      active = false;
+      void unlisten.then((off) => off());
+    };
+  }, [vault]);
+
+  const handleNavigate = useCallback(
+    (path: string) => {
+      void handleSelect(path);
+    },
+    [handleSelect],
+  );
+
+  // Click-to-create on an unresolved link: create the note, refresh the snapshot,
+  // then open it.
+  const handleCreate = useCallback(
+    (target: string) => {
+      void (async () => {
+        setError(null);
+        try {
+          const path = await createNote(target);
+          setTargets(await listLinkTargets());
+          await handleSelect(path);
+        } catch (e) {
+          setError(String(e));
+        }
+      })();
+    },
+    [handleSelect],
+  );
 
   const handleChange = useCallback((content: string) => {
     setOpen((prev) => (prev ? { ...prev, note: { ...prev.note, content } } : prev));
@@ -178,7 +228,14 @@ export function App() {
                     onError={setError}
                   />
                   {showPreview && (
-                    <Preview content={previewContent} vaultRoot={vault.root} notePath={open.path} />
+                    <Preview
+                      content={previewContent}
+                      vaultRoot={vault.root}
+                      notePath={open.path}
+                      targets={targets}
+                      onNavigate={handleNavigate}
+                      onCreate={handleCreate}
+                    />
                   )}
                 </div>
               </>

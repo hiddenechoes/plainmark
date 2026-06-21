@@ -2,6 +2,7 @@
 // filesystem directly (see .claude/rules/frontend.md) — every FS operation goes
 // through one of these wrappers.
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export interface TreeNode {
   name: string;
@@ -76,4 +77,76 @@ export function importAttachment(sourcePath: string): Promise<SavedAttachment> {
 /** Read an image inside the vault as a `data:` URL for the preview pane. */
 export function readImage(path: string): Promise<string> {
   return invoke<string>("read_image", { path });
+}
+
+/** A heading within a note (for `#heading` links and autocomplete). */
+export interface Heading {
+  text: string;
+  slug: string;
+  level: number;
+}
+
+/** A note in the link-target snapshot (Phase 2 graph). `path` is absolute (for
+ * navigation); `relPath` is vault-relative with forward slashes (for resolution). */
+export interface NoteMeta {
+  path: string;
+  relPath: string;
+  title: string;
+  headings: Heading[];
+}
+
+/** The result of resolving a `[[link]]` via the backend. */
+export interface ResolvedLink {
+  /** Absolute path of the target note, if it resolves. */
+  path: string | null;
+  exists: boolean;
+  /** Whether the optional `#heading` part exists in the target. */
+  headingOk: boolean;
+}
+
+/** One inbound link to the active note, for the backlinks panel. */
+export interface Backlink {
+  /** Absolute path of the linking note. */
+  from: string;
+  fromTitle: string;
+  line: number;
+  snippet: string;
+}
+
+/** Snapshot of every note for the link resolver and `[[` autocomplete. */
+export function listLinkTargets(): Promise<NoteMeta[]> {
+  return invoke<NoteMeta[]>("list_link_targets");
+}
+
+/** Resolve a `[[link]]` (note + optional `#heading`) from the note at `from`. */
+export function resolveLink(target: string, from: string): Promise<ResolvedLink> {
+  return invoke<ResolvedLink>("resolve_link", { target, from });
+}
+
+/** Inbound links to the note at `path` (absolute), with context snippets. */
+export function getBacklinks(path: string): Promise<Backlink[]> {
+  return invoke<Backlink[]>("backlinks", { path });
+}
+
+/** Create (or open, if it exists) a note for an unresolved link. Returns the
+ * note's absolute path. */
+export function createNote(target: string): Promise<string> {
+  return invoke<string>("create_note", { target });
+}
+
+/** A filesystem change to a note, pushed by the Rust watcher (SPEC §4.1). */
+export type NoteChange =
+  | { kind: "created"; path: string }
+  | { kind: "modified"; path: string }
+  | { kind: "removed"; path: string }
+  | { kind: "renamed"; from: string; to: string };
+
+/** Subscribe to "the index changed" (rebuild panels/snapshots). */
+export function onIndexUpdated(callback: () => void): Promise<UnlistenFn> {
+  return listen("index://updated", () => callback());
+}
+
+/** Subscribe to per-note filesystem changes (external-change handling). */
+export function onNoteChanged(callback: (change: NoteChange) => void): Promise<UnlistenFn> {
+  return listen<NoteChange>("note://changed", (event) => callback(event.payload));
 }

@@ -313,3 +313,31 @@ button:hover {
   list-style: none;
   padding-left: 18px;
 }
+
+/* Wiki links (SPEC §8.2/§8.8): resolved → accent, clickable; unresolved →
+ * muted/dashed, click offers to create; resolved-but-missing-heading → warning. */
+.wikilink {
+  color: var(--accent);
+  text-decoration: none;
+  cursor: pointer;
+  border-bottom: 1px solid transparent;
+}
+
+.wikilink:hover {
+  border-bottom-color: var(--accent);
+}
+
+.wikilink-unresolved {
+  color: var(--fg-dim);
+  border-bottom: 1px dashed var(--fg-dim);
+}
+
+.wikilink-unresolved:hover {
+  color: var(--fg);
+  border-bottom-color: var(--fg);
+}
+
+.wikilink-bad-heading {
+  color: var(--danger);
+  border-bottom: 1px dotted var(--danger);
+}
