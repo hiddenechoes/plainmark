@@ -225,6 +225,7 @@ export function App() {
                     onChange={handleChange}
                     onPasteImage={handlePasteImage}
                     onImportImage={handleImportImage}
+                    linkTargets={targets}
                     onError={setError}
                   />
                   {showPreview && (
