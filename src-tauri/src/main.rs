@@ -12,13 +12,15 @@ mod fs_ops;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
 use serde::Serialize;
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 use error::{AppError, AppResult};
-use fs_ops::{NoteFile, TreeNode};
+use fs_ops::{NoteFile, SavedAttachment, TreeNode};
 
 /// The currently open vault root. `None` until the user opens a vault.
 #[derive(Default)]
@@ -143,6 +145,40 @@ fn save_note(
     fs_ops::save_note(&target, &content, &eol, bom)
 }
 
+/// Save a pasted/dropped image into the vault's attachments folder. The webview
+/// hands over base64 bytes (it never touches the FS); we decode and write
+/// atomically (§7.1, §8.9), returning the vault-relative path for the embed.
+#[tauri::command]
+fn save_attachment(
+    data_base64: String,
+    ext: String,
+    state: State<'_, VaultState>,
+) -> AppResult<SavedAttachment> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.as_bytes())
+        .map_err(|e| AppError::InvalidPath(format!("invalid image data: {e}")))?;
+
+    let guard = state
+        .root
+        .lock()
+        .map_err(|_| AppError::Io("vault state lock poisoned".into()))?;
+    let root = guard.as_ref().ok_or(AppError::NoVault)?;
+
+    let now_millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    fs_ops::save_attachment(root, &bytes, &ext, now_millis)
+}
+
+/// Read an image inside the active vault and return it as a `data:` URL for the
+/// preview pane (path is validated to be inside the vault first).
+#[tauri::command]
+fn read_image(path: String, state: State<'_, VaultState>) -> AppResult<String> {
+    let target = resolve_in_vault(&state, &path)?;
+    fs_ops::read_image_data_url(&target)
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -152,7 +188,9 @@ fn main() {
             load_last_vault,
             refresh_tree,
             read_note,
-            save_note
+            save_note,
+            save_attachment,
+            read_image
         ])
         .run(tauri::generate_context!())
         .expect("error while running the plainmark application");

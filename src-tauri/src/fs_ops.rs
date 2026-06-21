@@ -7,11 +7,14 @@
 //! write goes through it. It writes a temp file in the *same* directory and
 //! renames it over the target, so a note is never partially written in place.
 
+use std::collections::hash_map::DefaultHasher;
 use std::fs::{self, File};
+use std::hash::{Hash, Hasher};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-use serde::Serialize;
+use base64::Engine as _;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
 
@@ -117,6 +120,142 @@ pub fn save_note(path: &Path, content: &str, eol: &str, bom: bool) -> AppResult<
 
     atomic_write(path, &bytes)?;
     Ok(())
+}
+
+/// Vault-local settings (`.plainmark/settings.json`). Phase 1 only reads the
+/// attachments folder; the settings UI and the rest of these keys arrive later
+/// (SPEC §7, Phase 5). A missing or corrupt file falls back to defaults.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultSettings {
+    #[serde(default = "default_attachments_dir")]
+    attachments_dir: String,
+}
+
+fn default_attachments_dir() -> String {
+    "Attachments".to_string()
+}
+
+impl Default for VaultSettings {
+    fn default() -> Self {
+        Self {
+            attachments_dir: default_attachments_dir(),
+        }
+    }
+}
+
+fn load_vault_settings(vault_root: &Path) -> VaultSettings {
+    let path = vault_root.join(".plainmark").join("settings.json");
+    match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(_) => VaultSettings::default(),
+    }
+}
+
+/// The result of saving a pasted/dropped attachment: a vault-relative,
+/// forward-slash path suitable for an `![[...]]` embed.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedAttachment {
+    pub relative_path: String,
+}
+
+/// Restrict a configured attachments folder to a *relative* subpath of the
+/// vault — reject absolute paths and any `..`/`.`/root component so a hostile
+/// `.plainmark/settings.json` can't redirect writes outside the vault.
+fn safe_subdir(name: &str) -> String {
+    let trimmed = name.trim();
+    let all_normal = !trimmed.is_empty()
+        && Path::new(trimmed)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)));
+    if all_normal {
+        trimmed.replace('\\', "/")
+    } else {
+        default_attachments_dir()
+    }
+}
+
+/// Reduce an extension to a safe lowercase alphanumeric token, defaulting to
+/// `png` (pasted clipboard images are almost always PNG).
+fn sanitize_ext(ext: &str) -> String {
+    let cleaned: String = ext.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if cleaned.is_empty() {
+        "png".to_string()
+    } else {
+        cleaned.to_lowercase()
+    }
+}
+
+/// A short, stable hex tag derived from the bytes, to keep names collision-safe
+/// even when two pastes land in the same millisecond.
+fn short_hash(bytes: &[u8]) -> String {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    format!("{:08x}", hasher.finish() & 0xffff_ffff)
+}
+
+/// Write image `bytes` into the vault's attachments folder under a
+/// collision-safe `{timestamp}-{hash}.{ext}` name, atomically (§7.1). Returns
+/// the vault-relative path for the inserted embed. `now_millis` is injected so
+/// the naming is testable.
+pub fn save_attachment(
+    vault_root: &Path,
+    bytes: &[u8],
+    ext: &str,
+    now_millis: u128,
+) -> AppResult<SavedAttachment> {
+    let dir_name = safe_subdir(&load_vault_settings(vault_root).attachments_dir);
+    let dir = vault_root.join(&dir_name);
+    let ext = sanitize_ext(ext);
+    let hash = short_hash(bytes);
+
+    // Bump a counter only if the candidate name is already taken on disk.
+    let mut counter = 0u32;
+    let file_name = loop {
+        let name = if counter == 0 {
+            format!("{now_millis}-{hash}.{ext}")
+        } else {
+            format!("{now_millis}-{hash}-{counter}.{ext}")
+        };
+        if !dir.join(&name).exists() {
+            break name;
+        }
+        counter += 1;
+    };
+
+    atomic_write(&dir.join(&file_name), bytes)?;
+    Ok(SavedAttachment {
+        relative_path: format!("{dir_name}/{file_name}"),
+    })
+}
+
+/// Read an image and return it as a `data:` URL, so the webview can render it
+/// without any direct filesystem access. The caller must have already scoped
+/// `path` to the active vault.
+pub fn read_image_data_url(path: &Path) -> AppResult<String> {
+    let bytes = fs::read(path)?;
+    let mime = mime_for(path);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{mime};base64,{encoded}"))
+}
+
+fn mime_for(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("bmp") => "image/bmp",
+        Some("avif") => "image/avif",
+        _ => "application/octet-stream",
+    }
 }
 
 /// Build the markdown file tree rooted at `root`, recursively. Hidden entries
@@ -304,6 +443,86 @@ mod tests {
         let note = vault.join("note.md");
         fs::write(&note, b"x").unwrap();
         assert!(ensure_within(&vault, &note).is_ok());
+    }
+
+    // §8.9: a saved attachment lands under `Attachments/`, round-trips its bytes,
+    // resolves inside the vault, and gets a collision-safe name.
+    #[test]
+    fn save_attachment_writes_under_attachments_and_round_trips() {
+        let dir = tempdir().unwrap();
+        let vault = dir.path();
+        let bytes = b"\x89PNG\r\n\x1a\nfake-image-bytes";
+
+        let saved = save_attachment(vault, bytes, "PNG", 1_700_000_000_000).unwrap();
+
+        assert!(
+            saved.relative_path.starts_with("Attachments/"),
+            "got {}",
+            saved.relative_path
+        );
+        assert!(saved.relative_path.ends_with(".png"));
+        let on_disk = vault.join(&saved.relative_path);
+        assert_eq!(fs::read(&on_disk).unwrap(), bytes);
+        // The returned path stays inside the vault.
+        assert!(ensure_within(vault, &on_disk).is_ok());
+    }
+
+    #[test]
+    fn save_attachment_generates_distinct_names_for_same_instant() {
+        let dir = tempdir().unwrap();
+        let vault = dir.path();
+        let bytes = b"collide";
+
+        let a = save_attachment(vault, bytes, "png", 42).unwrap();
+        let b = save_attachment(vault, bytes, "png", 42).unwrap();
+
+        assert_ne!(a.relative_path, b.relative_path);
+        assert!(vault.join(&a.relative_path).exists());
+        assert!(vault.join(&b.relative_path).exists());
+    }
+
+    #[test]
+    fn save_attachment_honors_vault_local_attachments_dir() {
+        let dir = tempdir().unwrap();
+        let vault = dir.path();
+        fs::create_dir_all(vault.join(".plainmark")).unwrap();
+        fs::write(
+            vault.join(".plainmark/settings.json"),
+            br#"{"attachmentsDir": "media/pics"}"#,
+        )
+        .unwrap();
+
+        let saved = save_attachment(vault, b"x", "png", 1).unwrap();
+        assert!(saved.relative_path.starts_with("media/pics/"));
+        assert!(vault.join(&saved.relative_path).exists());
+    }
+
+    #[test]
+    fn save_attachment_rejects_escaping_attachments_dir() {
+        let dir = tempdir().unwrap();
+        let vault = dir.path().join("vault");
+        fs::create_dir_all(vault.join(".plainmark")).unwrap();
+        fs::write(
+            vault.join(".plainmark/settings.json"),
+            br#"{"attachmentsDir": "../escape"}"#,
+        )
+        .unwrap();
+
+        let saved = save_attachment(&vault, b"x", "png", 1).unwrap();
+        // Falls back to the default folder instead of escaping the vault.
+        assert!(saved.relative_path.starts_with("Attachments/"));
+        assert!(!dir.path().join("escape").exists());
+    }
+
+    #[test]
+    fn read_image_data_url_encodes_mime_and_bytes() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("pic.png");
+        fs::write(&path, b"abc").unwrap();
+
+        let url = read_image_data_url(&path).unwrap();
+        // base64("abc") == "YWJj"
+        assert_eq!(url, "data:image/png;base64,YWJj");
     }
 
     #[test]
