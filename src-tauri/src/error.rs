@@ -14,6 +14,11 @@ pub enum AppError {
     OutsideVault,
     #[error("invalid path: {0}")]
     InvalidPath(String),
+    /// The on-disk file changed since it was last read — refuse to overwrite it
+    /// without reconciling (SPEC §7.1 no-blind-clobber). The frontend detects
+    /// this marker to prompt the user instead of silently losing data.
+    #[error("changed-on-disk: {0}")]
+    ChangedOnDisk(String),
 }
 
 impl From<std::io::Error> for AppError {

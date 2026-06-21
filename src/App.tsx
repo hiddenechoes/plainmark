@@ -3,7 +3,7 @@ import { BacklinksPanel } from "./components/BacklinksPanel";
 import { Editor } from "./components/Editor";
 import { FileTree } from "./components/FileTree";
 import { Preview } from "./components/Preview";
-import { basename, relativeTo } from "./lib/path";
+import { basename, dirname, joinPath, relativeTo } from "./lib/path";
 import {
   createNote,
   importAttachment,
@@ -12,6 +12,7 @@ import {
   onIndexUpdated,
   pickVault,
   readNote,
+  renameNote,
   saveClipboardImage,
   saveNote,
   type NoteFile,
@@ -44,6 +45,8 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [showPreview, setShowPreview] = useState(true);
   const [targets, setTargets] = useState<NoteMeta[]>([]);
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
 
   const previewContent = useDebounced(open?.note.content ?? "", 200);
 
@@ -109,6 +112,35 @@ export function App() {
     },
     [handleSelect],
   );
+
+  // Rename the open note (keeping it in the same folder). The backend rewrites
+  // inbound links across the vault atomically (§8.2); we then open the new path.
+  const startRename = useCallback(() => {
+    if (!open) return;
+    setRenameValue(basename(open.path).replace(/\.md$/i, ""));
+    setRenaming(true);
+  }, [open]);
+
+  const submitRename = useCallback(() => {
+    if (!open) return;
+    const name = renameValue.trim();
+    if (name === "" || `${name}.md` === basename(open.path)) {
+      setRenaming(false);
+      return;
+    }
+    void (async () => {
+      setError(null);
+      try {
+        const newPath = joinPath(dirname(open.path), `${name}.md`);
+        const finalPath = await renameNote(open.path, newPath);
+        setRenaming(false);
+        setTargets(await listLinkTargets());
+        await handleSelect(finalPath);
+      } catch (e) {
+        setError(String(e));
+      }
+    })();
+  }, [open, renameValue, handleSelect]);
 
   // Click-to-create on an unresolved link: create the note, refresh the snapshot,
   // then open it.
@@ -207,7 +239,28 @@ export function App() {
             {open ? (
               <>
                 <div className="editor-status">
-                  <span>{relativeTo(vault.root, open.path)}</span>
+                  {renaming ? (
+                    <input
+                      className="rename-input"
+                      autoFocus
+                      value={renameValue}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") submitRename();
+                        else if (e.key === "Escape") setRenaming(false);
+                      }}
+                      onBlur={() => setRenaming(false)}
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      className="note-name"
+                      title="Rename note"
+                      onClick={startRename}
+                    >
+                      {relativeTo(vault.root, open.path)}
+                    </button>
+                  )}
                   <span className="spacer" />
                   {dirty && <span className="dirty">● unsaved</span>}
                   {!dirty && status && <span className="saved">{status}</span>}

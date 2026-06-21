@@ -24,7 +24,13 @@ export interface NoteFile {
   eol: "lf" | "crlf";
   /** Whether the file had a UTF-8 BOM. */
   bom: boolean;
+  /** Hash of the on-disk bytes at read time, for the no-blind-clobber check. */
+  token: string;
 }
+
+/** The marker (Rust `AppError::ChangedOnDisk`) used to detect a no-blind-clobber
+ * rejection, so the UI can prompt instead of treating it as a generic error. */
+export const CHANGED_ON_DISK = "changed-on-disk";
 
 /** Open the native folder picker and load the chosen vault. `null` if cancelled. */
 export function pickVault(): Promise<VaultInfo | null> {
@@ -46,14 +52,22 @@ export function readNote(path: string): Promise<NoteFile> {
   return invoke<NoteFile>("read_note", { path });
 }
 
-/** Save a note atomically, preserving its line endings and BOM. */
+/** Save a note atomically, preserving its line endings and BOM. Passes the
+ * note's read-time token so the backend rejects a blind clobber (§7.1). */
 export function saveNote(path: string, note: NoteFile): Promise<void> {
   return invoke<void>("save_note", {
     path,
     content: note.content,
     eol: note.eol,
     bom: note.bom,
+    baseToken: note.token,
   });
+}
+
+/** Rename/move a note (absolute paths), rewriting inbound links across the vault.
+ * Returns the new absolute path. */
+export function renameNote(oldPath: string, newPath: string): Promise<string> {
+  return invoke<string>("rename_note", { oldPath, newPath });
 }
 
 /** A saved attachment, located by a vault-relative, forward-slash path. */

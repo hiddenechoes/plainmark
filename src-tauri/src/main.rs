@@ -332,6 +332,53 @@ fn create_note(
     Ok(abs.to_string_lossy().to_string())
 }
 
+/// Rename or move a note, rewriting inbound `[[links]]` across the vault
+/// atomically (SPEC §8.2 + §7.1). `new_path` is absolute; it must be inside the
+/// vault and must not already exist (no clobber). Returns the new absolute path.
+#[tauri::command]
+fn rename_note(
+    app: tauri::AppHandle,
+    old_path: String,
+    new_path: String,
+    state: State<'_, VaultState>,
+) -> AppResult<String> {
+    let root = vault_root(&state)?;
+    let old_abs = fs_ops::ensure_within(&root, Path::new(&old_path))?;
+    if !old_abs.is_file() {
+        return Err(AppError::InvalidPath(format!(
+            "note does not exist: {old_path}"
+        )));
+    }
+
+    let new_raw = Path::new(&new_path);
+    if let Some(parent) = new_raw.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let new_abs = fs_ops::ensure_within(&root, new_raw)?;
+    if new_abs == old_abs {
+        return Ok(old_path);
+    }
+    if new_abs.exists() {
+        return Err(AppError::InvalidPath(format!(
+            "a file already exists at {new_path}"
+        )));
+    }
+
+    let old_rel = index::to_rel(&root, &old_abs).ok_or(AppError::OutsideVault)?;
+    let new_rel = index::to_rel(&root, &new_abs).ok_or(AppError::OutsideVault)?;
+
+    {
+        let mut idx = state
+            .index
+            .write()
+            .map_err(|_| AppError::Io("index lock poisoned".into()))?;
+        index::perform_rename(&root, &mut idx, &old_rel, &new_rel)?;
+    }
+    let _ = app.emit("index://updated", ());
+
+    Ok(new_abs.to_string_lossy().to_string())
+}
+
 fn resolve_in_vault(state: &VaultState, path: &str) -> AppResult<PathBuf> {
     let guard = state
         .root
@@ -400,16 +447,20 @@ fn read_note(path: String, state: State<'_, VaultState>) -> AppResult<NoteFile> 
     fs_ops::read_note(&target)
 }
 
-/// Save a note atomically, preserving its original line endings and BOM.
+/// Save a note atomically, preserving its original line endings and BOM. If
+/// `baseToken` is given, refuse the write when the file changed on disk since it
+/// was read (SPEC §7.1 no-blind-clobber); the frontend then prompts the user.
 #[tauri::command]
 fn save_note(
     path: String,
     content: String,
     eol: String,
     bom: bool,
+    base_token: Option<String>,
     state: State<'_, VaultState>,
 ) -> AppResult<()> {
     let target = resolve_in_vault(&state, &path)?;
+    fs_ops::guard_unchanged(&target, base_token.as_deref())?;
     fs_ops::save_note(&target, &content, &eol, bom)
 }
 
@@ -503,7 +554,8 @@ fn main() {
             resolve_link,
             list_link_targets,
             backlinks,
-            create_note
+            create_note,
+            rename_note
         ])
         .run(tauri::generate_context!())
         .expect("error while running the plainmark application");

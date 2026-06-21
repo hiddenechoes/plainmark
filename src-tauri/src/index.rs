@@ -310,6 +310,141 @@ pub fn build_index(vault_root: &Path) -> Index {
     index
 }
 
+/// Rename/move a note and rewrite every inbound `[[link]]` so it still resolves
+/// (SPEC §8.2 + §7.1). The scariest operation in the app, so it is precise and
+/// batched: the file is moved, then for each note that linked to it we re-read
+/// the current bytes, replace **only** the link-target text of the occurrences
+/// that resolved to the old note (preserving any `#heading`/`|alias`), and save
+/// via the atomic path — which preserves each file's own EOL/BOM. `[[links]]` in
+/// code are left untouched. The in-memory index is updated to match.
+///
+/// Resolution is done against the index **before** it's updated (it still maps
+/// the old name), which is why inbound links are collected and rewritten first.
+pub fn perform_rename(
+    vault_root: &Path,
+    index: &mut Index,
+    old_rel: &str,
+    new_rel: &str,
+) -> crate::error::AppResult<()> {
+    let old_abs = vault_root.join(old_rel);
+    let new_abs = vault_root.join(new_rel);
+
+    // Collect the distinct notes that link to the old note, before any change.
+    let froms: Vec<String> = {
+        let mut set = HashSet::new();
+        for b in index.backlinks(old_rel) {
+            set.insert(b.from);
+        }
+        set.into_iter().collect()
+    };
+
+    if let Some(parent) = new_abs.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(&old_abs, &new_abs)?;
+
+    // Rewrite inbound links (index still resolves the old name).
+    for from_rel in &froms {
+        let from_abs = vault_root.join(from_rel);
+        if let Ok(note) = crate::fs_ops::read_note(&from_abs) {
+            if let Some(rewritten) =
+                rewrite_inbound_links(&note.content, from_rel, index, old_rel, new_rel)
+            {
+                crate::fs_ops::save_note(&from_abs, &rewritten, &note.eol, note.bom)?;
+            }
+        }
+    }
+
+    // Update the index to match disk: drop the old, (re)index new + rewritten.
+    index.remove(old_rel);
+    reindex_path(index, vault_root, &new_abs);
+    for from_rel in &froms {
+        reindex_path(index, vault_root, &vault_root.join(from_rel));
+    }
+    Ok(())
+}
+
+/// Rewrite `[[links]]` in `content` (from the note at `from_rel`) that resolve to
+/// `old_rel`, pointing them at `new_rel`. Bare targets become the new filename
+/// stem (or the new path if that stem is ambiguous); path-qualified targets
+/// become the new path. `#heading`/`|alias` and all other bytes are preserved;
+/// links in code spans/blocks and `![[embeds]]` are skipped. Returns `None` if
+/// nothing changed.
+pub fn rewrite_inbound_links(
+    content: &str,
+    from_rel: &str,
+    index: &Index,
+    old_rel: &str,
+    new_rel: &str,
+) -> Option<String> {
+    let new_stem = stem_of(new_rel);
+    let new_path_ref = new_rel.strip_suffix(".md").unwrap_or(new_rel);
+    let ambiguous = index
+        .entries()
+        .any(|e| e.rel_path != old_rel && stem_of(&e.rel_path).eq_ignore_ascii_case(new_stem));
+    let new_bare = if ambiguous { new_path_ref } else { new_stem };
+
+    let (_, code_ranges) = headings_and_code_ranges(content);
+    let bytes = content.as_bytes();
+    let mut out = String::with_capacity(content.len());
+    let mut i = 0;
+    let mut last = 0;
+    let mut changed = false;
+
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'[' && bytes[i + 1] == b'[' {
+            if let Some(close) = find_close(bytes, i + 2) {
+                let inner = &content[i + 2..close];
+                let is_embed = i > 0 && bytes[i - 1] == b'!';
+                let in_code = code_ranges.iter().any(|r| r.contains(&i));
+                if !is_embed && !in_code {
+                    let (before_alias, alias) = match inner.split_once('|') {
+                        Some((b, a)) => (b, Some(a)),
+                        None => (inner, None),
+                    };
+                    let (target_raw, heading) = match before_alias.split_once('#') {
+                        Some((t, h)) => (t, Some(h)),
+                        None => (before_alias, None),
+                    };
+                    let target = target_raw.trim();
+                    if !target.is_empty()
+                        && index.resolve(target, from_rel).as_deref() == Some(old_rel)
+                    {
+                        let replacement = if target.contains('/') {
+                            new_path_ref
+                        } else {
+                            new_bare
+                        };
+                        out.push_str(&content[last..i]);
+                        out.push_str("[[");
+                        out.push_str(replacement);
+                        if let Some(h) = heading {
+                            out.push('#');
+                            out.push_str(h);
+                        }
+                        if let Some(a) = alias {
+                            out.push('|');
+                            out.push_str(a);
+                        }
+                        out.push_str("]]");
+                        last = close + 2;
+                        changed = true;
+                    }
+                }
+                i = close + 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    if !changed {
+        return None;
+    }
+    out.push_str(&content[last..]);
+    Some(out)
+}
+
 /// Apply one watcher [`IndexEvent`](crate::watcher::IndexEvent) to the live
 /// index, keeping it in step with the filesystem. (Rename *link-rewriting* is a
 /// separate, deliberate command; this only keeps the graph current.)
@@ -334,7 +469,7 @@ pub fn apply_event(index: &mut Index, vault_root: &Path, event: &crate::watcher:
 }
 
 /// Reparse a single file (by absolute path) and upsert it into the index.
-fn reindex_path(index: &mut Index, vault_root: &Path, abs: &Path) {
+pub fn reindex_path(index: &mut Index, vault_root: &Path, abs: &Path) {
     if let Some(rel) = to_rel(vault_root, abs) {
         let (mtime, size) = file_stat(abs);
         if let Ok(note) = crate::fs_ops::read_note(abs) {
@@ -729,6 +864,89 @@ mod tests {
         let idx2 = build_index(vault);
         assert_eq!(idx2.len(), 2);
         assert_eq!(idx2.backlinks("Inbox.md").len(), 1);
+    }
+
+    #[test]
+    fn rewrite_inbound_links_changes_only_resolving_targets() {
+        let mut idx = Index::new();
+        idx.insert(entry("Old.md", ""));
+        let from = "note.md";
+        // Bare link resolves to Old → rewritten; a code span and a non-matching
+        // link are left alone.
+        let content = "see [[Old]] and `[[Old]]` and [[Other]]\n";
+        let out = rewrite_inbound_links(content, from, &idx, "Old.md", "New.md").unwrap();
+        assert_eq!(out, "see [[New]] and `[[Old]]` and [[Other]]\n");
+    }
+
+    #[test]
+    fn rewrite_preserves_heading_and_alias() {
+        let mut idx = Index::new();
+        idx.insert(entry("Old.md", "# Goals\n"));
+        let out =
+            rewrite_inbound_links("[[Old#Goals|My Plan]]\n", "n.md", &idx, "Old.md", "New.md")
+                .unwrap();
+        assert_eq!(out, "[[New#Goals|My Plan]]\n");
+    }
+
+    #[test]
+    fn rewrite_path_qualified_target_uses_new_path() {
+        let mut idx = Index::new();
+        idx.insert(entry("Work/Old.md", ""));
+        let out =
+            rewrite_inbound_links("[[Work/Old]]\n", "n.md", &idx, "Work/Old.md", "Work/New.md")
+                .unwrap();
+        assert_eq!(out, "[[Work/New]]\n");
+    }
+
+    // The headline §8.2 + §7.1 test: a rename rewrites inbound links across
+    // multiple files, atomically, preserving each file's EOL/BOM byte-for-byte,
+    // and never touches `[[links]]` inside code.
+    #[test]
+    fn perform_rename_rewrites_across_files_preserving_eol_bom() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path();
+
+        std::fs::write(vault.join("Old.md"), b"# Old\n").unwrap();
+
+        // Linker A: UTF-8 BOM + CRLF.
+        let a_original = {
+            let mut v = vec![0xEF, 0xBB, 0xBF];
+            v.extend_from_slice(b"see [[Old]] here\r\n");
+            v
+        };
+        std::fs::write(vault.join("A.md"), &a_original).unwrap();
+
+        // Linker B: plain LF, with a real link in prose and a fenced-code link
+        // that must NOT be rewritten.
+        std::fs::write(vault.join("B.md"), b"link [[Old]]\n\n```\n[[Old]]\n```\n").unwrap();
+
+        let mut idx = build_index(vault);
+        assert_eq!(idx.backlinks("Old.md").len(), 2);
+
+        perform_rename(vault, &mut idx, "Old.md", "New.md").unwrap();
+
+        // File moved on disk.
+        assert!(!vault.join("Old.md").exists());
+        assert!(vault.join("New.md").exists());
+
+        // A: BOM + CRLF preserved, only the target text changed.
+        let a_expected = {
+            let mut v = vec![0xEF, 0xBB, 0xBF];
+            v.extend_from_slice(b"see [[New]] here\r\n");
+            v
+        };
+        assert_eq!(std::fs::read(vault.join("A.md")).unwrap(), a_expected);
+
+        // B: prose link rewritten; the fenced-code link untouched.
+        assert_eq!(
+            std::fs::read(vault.join("B.md")).unwrap(),
+            b"link [[New]]\n\n```\n[[Old]]\n```\n"
+        );
+
+        // Index now resolves the new name and reports both backlinks.
+        assert_eq!(idx.resolve("New", "A.md").as_deref(), Some("New.md"));
+        assert_eq!(idx.resolve("Old", "A.md"), None);
+        assert_eq!(idx.backlinks("New.md").len(), 2);
     }
 
     #[test]
