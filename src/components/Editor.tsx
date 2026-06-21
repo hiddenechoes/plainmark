@@ -26,13 +26,18 @@ export function Editor({ doc, onChange, onPasteImage, onImportImage, onError }: 
   // the editor (which would reset the cursor on every keystroke).
   const initialDocRef = useRef(doc);
   const onChangeRef = useRef(onChange);
-  onChangeRef.current = onChange;
   const onPasteImageRef = useRef(onPasteImage);
-  onPasteImageRef.current = onPasteImage;
   const onImportImageRef = useRef(onImportImage);
-  onImportImageRef.current = onImportImage;
   const onErrorRef = useRef(onError);
-  onErrorRef.current = onError;
+  // Keep the latest callbacks in refs without re-creating the editor. Writing
+  // refs in an effect (rather than during render) runs after every render and
+  // before any editor event handler can read them.
+  useEffect(() => {
+    onChangeRef.current = onChange;
+    onPasteImageRef.current = onPasteImage;
+    onImportImageRef.current = onImportImage;
+    onErrorRef.current = onError;
+  });
 
   useEffect(() => {
     const host = hostRef.current;
