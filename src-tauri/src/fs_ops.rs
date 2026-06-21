@@ -312,6 +312,33 @@ fn has_md_extension(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Recursively collect every `.md` file under `root`, skipping hidden entries
+/// (`.plainmark/`, `.git/`, …) the same way [`build_tree`] does. Used by the
+/// indexer to build the link graph on vault open.
+pub fn list_md_files(root: &Path) -> AppResult<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    collect_md_files(root, &mut out)?;
+    Ok(out)
+}
+
+fn collect_md_files(dir: &Path, out: &mut Vec<PathBuf>) -> AppResult<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_md_files(&path, out)?;
+        } else if file_type.is_file() && has_md_extension(&path) {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
 /// Ensure `target` resolves to a location inside `vault`, defending against
 /// `..` traversal. Returns the canonical path to use. Works for both existing
 /// files and not-yet-created files (canonicalizes the nearest existing parent).

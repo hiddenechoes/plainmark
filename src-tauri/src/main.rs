@@ -6,13 +6,15 @@
 //! small, typed Tauri command surface to the webview (SPEC §6, §7.1). Each
 //! command that touches a path validates it is inside the active vault first.
 
+mod cache;
 mod config;
 mod error;
 mod fs_ops;
+mod index;
 mod watcher;
 
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -22,15 +24,18 @@ use tauri_plugin_dialog::DialogExt;
 
 use error::{AppError, AppResult};
 use fs_ops::{NoteFile, SavedAttachment, TreeNode};
+use index::{Heading, Index};
 use watcher::VaultWatcher;
 
 /// The currently open vault root. `None` until the user opens a vault.
 /// `watcher` keeps the active file watcher alive (dropping it stops watching);
-/// re-opening a vault replaces it.
+/// re-opening a vault replaces it. `index` is the live link graph, shared with
+/// the watcher thread (it applies incremental updates) via an `Arc`.
 #[derive(Default)]
 struct VaultState {
     root: Mutex<Option<PathBuf>>,
     watcher: Mutex<Option<VaultWatcher>>,
+    index: Arc<RwLock<Index>>,
 }
 
 /// Returned to the frontend after opening a vault.
@@ -63,6 +68,23 @@ fn open_vault_at(
         .lock()
         .map_err(|_| AppError::Io("vault state lock poisoned".into()))? = Some(root.clone());
 
+    // Build the link index (cache-accelerated) before wiring the watcher so the
+    // first events apply on top of a complete graph.
+    let built = index::build_index(&root);
+    eprintln!(
+        "plainmark: indexed {} note(s){}",
+        built.len(),
+        if built.is_empty() {
+            " (empty vault)"
+        } else {
+            ""
+        }
+    );
+    *state
+        .index
+        .write()
+        .map_err(|_| AppError::Io("index lock poisoned".into()))? = built;
+
     start_watcher(app, state, &root)?;
 
     Ok(VaultInfo {
@@ -71,19 +93,34 @@ fn open_vault_at(
     })
 }
 
-/// Start watching `root` and forward each change to the webview as a
-/// `note://changed` event (drives external-change handling, §4.1). The watcher is
-/// stored in `VaultState` so it lives as long as the vault is open. A failure to
-/// start the watcher is non-fatal: the vault still opens, just without live
-/// updates.
+/// Start watching `root`. On each change the watcher thread updates the shared
+/// index incrementally, then notifies the webview: `note://changed` per change
+/// (drives external-change handling, §4.1) and a single `index://updated` so
+/// panels refresh. The watcher is stored in `VaultState` so it lives as long as
+/// the vault is open. A failure to start is non-fatal: the vault still opens,
+/// just without live updates.
+///
+/// The watcher updates the in-memory index only; the SQLite cache is reconciled
+/// on the next vault open (`build_index` reparses any file whose mtime/size no
+/// longer matches its cached row), so an edited file's cache row self-heals
+/// rather than being written through from this thread.
 fn start_watcher(app: &tauri::AppHandle, state: &VaultState, root: &Path) -> AppResult<()> {
     let config = watcher::load_watch_config(root);
     let app_handle = app.clone();
+    let index = Arc::clone(&state.index);
+    let root_buf = root.to_path_buf();
+
     let started = VaultWatcher::start(root, config, move |batch| {
-        for ev in batch {
+        if let Ok(mut idx) = index.write() {
+            for ev in &batch {
+                index::apply_event(&mut idx, &root_buf, ev);
+            }
+        }
+        for ev in &batch {
             // If the webview has gone away the emit just fails; nothing to do.
             let _ = app_handle.emit("note://changed", ev);
         }
+        let _ = app_handle.emit("index://updated", ());
     });
 
     match started {
@@ -98,6 +135,201 @@ fn start_watcher(app: &tauri::AppHandle, state: &VaultState, root: &Path) -> App
         }
     }
     Ok(())
+}
+
+/// The active vault root, or `NoVault` if none is open.
+fn vault_root(state: &VaultState) -> AppResult<PathBuf> {
+    state
+        .root
+        .lock()
+        .map_err(|_| AppError::Io("vault state lock poisoned".into()))?
+        .clone()
+        .ok_or(AppError::NoVault)
+}
+
+/// A note exposed to the webview for the link-target snapshot and autocomplete.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NoteMeta {
+    /// Absolute path (matches the file-tree paths the webview already uses).
+    path: String,
+    /// Vault-relative, forward-slash path (used by the frontend link resolver).
+    rel_path: String,
+    title: String,
+    headings: Vec<Heading>,
+}
+
+/// The result of resolving a `[[link]]` for the webview.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolvedLink {
+    /// Absolute path of the target note, if it resolves.
+    path: Option<String>,
+    exists: bool,
+    /// Whether the optional `#heading` part exists in the target.
+    heading_ok: bool,
+}
+
+/// One inbound link, for the backlinks panel.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BacklinkOut {
+    /// Absolute path of the linking note.
+    from: String,
+    from_title: String,
+    line: usize,
+    snippet: String,
+}
+
+/// Split a raw link body into its note target and optional `#heading`, dropping
+/// any `|alias` (aliases are out of scope this phase).
+fn split_target(raw: &str) -> (String, Option<String>) {
+    let before_alias = raw.split('|').next().unwrap_or("");
+    let mut parts = before_alias.splitn(2, '#');
+    let target = parts.next().unwrap_or("").trim().to_string();
+    let heading = parts
+        .next()
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty());
+    (target, heading)
+}
+
+/// Turn a link target into a safe vault-relative `.md` path, rejecting absolute
+/// paths and any `..`/root component so a created note can't escape the vault.
+fn safe_note_rel(target: &str) -> AppResult<String> {
+    let cleaned = target.trim().replace('\\', "/");
+    let cleaned = cleaned.trim_matches('/');
+    let with_md = if cleaned.to_lowercase().ends_with(".md") {
+        cleaned.to_string()
+    } else {
+        format!("{cleaned}.md")
+    };
+    let all_normal = !cleaned.is_empty()
+        && Path::new(&with_md)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)));
+    if all_normal {
+        Ok(with_md)
+    } else {
+        Err(AppError::InvalidPath(format!(
+            "invalid note name: {target}"
+        )))
+    }
+}
+
+/// Resolve a `[[link]]` (note part + optional `#heading`) from the note at
+/// `from` (absolute path). Returns the target's absolute path if it exists.
+#[tauri::command]
+fn resolve_link(
+    target: String,
+    from: String,
+    state: State<'_, VaultState>,
+) -> AppResult<ResolvedLink> {
+    let root = vault_root(&state)?;
+    let from_rel = index::to_rel(&root, Path::new(&from)).unwrap_or_default();
+    let (note, heading) = split_target(&target);
+    let idx = state
+        .index
+        .read()
+        .map_err(|_| AppError::Io("index lock poisoned".into()))?;
+    let status = idx.link_status(&note, heading.as_deref(), &from_rel);
+    let path = status
+        .path
+        .as_ref()
+        .map(|rel| root.join(rel).to_string_lossy().to_string());
+    Ok(ResolvedLink {
+        exists: status.path.is_some(),
+        path,
+        heading_ok: status.heading_ok,
+    })
+}
+
+/// Snapshot of every note (title + headings + paths) for the frontend link
+/// resolver and `[[` autocomplete.
+#[tauri::command]
+fn list_link_targets(state: State<'_, VaultState>) -> AppResult<Vec<NoteMeta>> {
+    let root = vault_root(&state)?;
+    let idx = state
+        .index
+        .read()
+        .map_err(|_| AppError::Io("index lock poisoned".into()))?;
+    let mut out: Vec<NoteMeta> = idx
+        .entries()
+        .map(|e| NoteMeta {
+            path: root.join(&e.rel_path).to_string_lossy().to_string(),
+            rel_path: e.rel_path.clone(),
+            title: e.title.clone(),
+            headings: e.headings.clone(),
+        })
+        .collect();
+    out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    Ok(out)
+}
+
+/// Inbound links to the note at `path` (absolute), with context snippets.
+#[tauri::command]
+fn backlinks(path: String, state: State<'_, VaultState>) -> AppResult<Vec<BacklinkOut>> {
+    let root = vault_root(&state)?;
+    let rel = index::to_rel(&root, Path::new(&path)).ok_or(AppError::OutsideVault)?;
+    let idx = state
+        .index
+        .read()
+        .map_err(|_| AppError::Io("index lock poisoned".into()))?;
+    Ok(idx
+        .backlinks(&rel)
+        .into_iter()
+        .map(|b| {
+            let from_title = idx
+                .get(&b.from)
+                .map(|e| e.title.clone())
+                .unwrap_or_else(|| b.from.clone());
+            BacklinkOut {
+                from: root.join(&b.from).to_string_lossy().to_string(),
+                from_title,
+                line: b.line,
+                snippet: b.snippet,
+            }
+        })
+        .collect())
+}
+
+/// Create a note for an unresolved link (click-to-create). Idempotent: returns
+/// the existing note's path if it already exists. Returns the absolute path.
+#[tauri::command]
+fn create_note(
+    app: tauri::AppHandle,
+    target: String,
+    state: State<'_, VaultState>,
+) -> AppResult<String> {
+    let root = vault_root(&state)?;
+    let rel = safe_note_rel(&split_target(&target).0)?;
+    let unchecked = root.join(&rel);
+    if let Some(parent) = unchecked.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let abs = fs_ops::ensure_within(&root, &unchecked)?;
+
+    if !abs.exists() {
+        let title = Path::new(&rel)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Untitled");
+        fs_ops::save_note(&abs, &format!("# {title}\n"), "lf", false)?;
+    }
+
+    // Update the index immediately so the link resolves without waiting for the
+    // watcher; the watcher's later event is harmless (insert is idempotent).
+    let (mtime, size) = index::file_stat(&abs);
+    if let Ok(note) = fs_ops::read_note(&abs) {
+        let mut idx = state
+            .index
+            .write()
+            .map_err(|_| AppError::Io("index lock poisoned".into()))?;
+        idx.insert(index::build_entry(rel, mtime, size, &note.content));
+    }
+    let _ = app.emit("index://updated", ());
+
+    Ok(abs.to_string_lossy().to_string())
 }
 
 fn resolve_in_vault(state: &VaultState, path: &str) -> AppResult<PathBuf> {
@@ -267,7 +499,11 @@ fn main() {
             save_note,
             save_clipboard_image,
             import_attachment,
-            read_image
+            read_image,
+            resolve_link,
+            list_link_targets,
+            backlinks,
+            create_note
         ])
         .run(tauri::generate_context!())
         .expect("error while running the plainmark application");
