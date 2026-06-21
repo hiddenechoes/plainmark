@@ -54,3 +54,26 @@ export function saveNote(path: string, note: NoteFile): Promise<void> {
     bom: note.bom,
   });
 }
+
+/** A saved attachment, located by a vault-relative, forward-slash path. */
+export interface SavedAttachment {
+  relativePath: string;
+}
+
+/** Save an image from the system clipboard into the vault's attachments folder.
+ * Resolves to `null` if the clipboard holds no image (so a text paste is left
+ * untouched). Reading the clipboard in Rust is far more reliable than the
+ * webview's `paste` event, especially on Linux/WebKitGTK. */
+export function saveClipboardImage(): Promise<SavedAttachment | null> {
+  return invoke<SavedAttachment | null>("save_clipboard_image");
+}
+
+/** Copy a dropped image file (by absolute source path) into the vault. */
+export function importAttachment(sourcePath: string): Promise<SavedAttachment> {
+  return invoke<SavedAttachment>("import_attachment", { sourcePath });
+}
+
+/** Read an image inside the vault as a `data:` URL for the preview pane. */
+export function readImage(path: string): Promise<string> {
+  return invoke<string>("read_image", { path });
+}
