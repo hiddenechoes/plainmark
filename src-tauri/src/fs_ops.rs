@@ -405,6 +405,40 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), original);
     }
 
+    // §7.1 / §8.9: pasting an image is the webview inserting an `![[...]]` line
+    // into the (LF-normalized) content, then save_note restoring the original
+    // EOL/BOM. Only the inserted region must change — every other byte is
+    // preserved exactly, including the CRLFs and the BOM.
+    #[test]
+    fn paste_into_crlf_bom_note_changes_only_the_inserted_line() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        let original: Vec<u8> = {
+            let mut v = vec![0xEF, 0xBB, 0xBF];
+            v.extend_from_slice(b"# Title\r\n\r\nbody line\r\n");
+            v
+        };
+        fs::write(&path, &original).unwrap();
+
+        let note = read_note(&path).unwrap();
+        assert_eq!(note.content, "# Title\n\nbody line\n");
+
+        // Editor inserts the embed at the cursor (here: start of line 3).
+        let edited = note
+            .content
+            .replace("body line", "![[Attachments/x.png]]\nbody line");
+        save_note(&path, &edited, &note.eol, note.bom).unwrap();
+
+        // Expected bytes: original, with exactly the embed line spliced in as
+        // CRLF, BOM intact, nothing else touched.
+        let expected: Vec<u8> = {
+            let mut v = vec![0xEF, 0xBB, 0xBF];
+            v.extend_from_slice(b"# Title\r\n\r\n![[Attachments/x.png]]\r\nbody line\r\n");
+            v
+        };
+        assert_eq!(fs::read(&path).unwrap(), expected);
+    }
+
     #[test]
     fn save_note_plain_lf_no_bom_stays_plain() {
         let dir = tempdir().unwrap();
