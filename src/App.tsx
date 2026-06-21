@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { Editor } from "./components/Editor";
 import { FileTree } from "./components/FileTree";
+import { Preview } from "./components/Preview";
 import { basename, relativeTo } from "./lib/path";
 import {
   loadLastVault,
   pickVault,
   readNote,
+  saveAttachment,
   saveNote,
   type NoteFile,
   type VaultInfo,
@@ -17,12 +19,26 @@ interface OpenNote {
   note: NoteFile;
 }
 
+/** Debounce a value so the preview re-renders at most every `delay` ms while
+ * typing, keeping render cost bounded on large notes. */
+function useDebounced<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const id = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(id);
+  }, [value, delay]);
+  return debounced;
+}
+
 export function App() {
   const [vault, setVault] = useState<VaultInfo | null>(null);
   const [open, setOpen] = useState<OpenNote | null>(null);
   const [dirty, setDirty] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [showPreview, setShowPreview] = useState(true);
+
+  const previewContent = useDebounced(open?.note.content ?? "", 200);
 
   // Reopen the last vault on launch (SPEC §7 recent-vault behavior).
   useEffect(() => {
@@ -77,6 +93,13 @@ export function App() {
     }
   }, [open]);
 
+  // Persist a pasted/dropped image and report its vault-relative path; the
+  // editor inserts the embed and the note becomes dirty (saved on Cmd/Ctrl+S).
+  const handleSaveImage = useCallback(async (dataBase64: string, ext: string) => {
+    const { relativePath } = await saveAttachment(dataBase64, ext);
+    return relativePath;
+  }, []);
+
   // Cmd/Ctrl+S saves, regardless of which pane has focus.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -129,8 +152,27 @@ export function App() {
                   <span className="spacer" />
                   {dirty && <span className="dirty">● unsaved</span>}
                   {!dirty && status && <span className="saved">{status}</span>}
+                  <button
+                    type="button"
+                    className="preview-toggle"
+                    aria-pressed={showPreview}
+                    onClick={() => setShowPreview((s) => !s)}
+                  >
+                    {showPreview ? "Hide preview" : "Show preview"}
+                  </button>
                 </div>
-                <Editor key={open.path} doc={open.note.content} onChange={handleChange} />
+                <div className={showPreview ? "split split-both" : "split"}>
+                  <Editor
+                    key={open.path}
+                    doc={open.note.content}
+                    onChange={handleChange}
+                    onSaveImage={handleSaveImage}
+                    onError={setError}
+                  />
+                  {showPreview && (
+                    <Preview content={previewContent} vaultRoot={vault.root} notePath={open.path} />
+                  )}
+                </div>
               </>
             ) : (
               <p className="editor-placeholder">Select a note from the file tree.</p>

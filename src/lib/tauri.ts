@@ -54,3 +54,18 @@ export function saveNote(path: string, note: NoteFile): Promise<void> {
     bom: note.bom,
   });
 }
+
+/** A saved attachment, located by a vault-relative, forward-slash path. */
+export interface SavedAttachment {
+  relativePath: string;
+}
+
+/** Save a pasted/dropped image (base64) into the vault's attachments folder. */
+export function saveAttachment(dataBase64: string, ext: string): Promise<SavedAttachment> {
+  return invoke<SavedAttachment>("save_attachment", { dataBase64, ext });
+}
+
+/** Read an image inside the vault as a `data:` URL for the preview pane. */
+export function readImage(path: string): Promise<string> {
+  return invoke<string>("read_image", { path });
+}
