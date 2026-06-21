@@ -28,17 +28,31 @@ export function Mermaid({ code }: { code: string }) {
     let active = true;
     ensureInitialized();
     const id = `plainmark-mermaid-${(counter += 1)}`;
-    mermaid
-      .render(id, code)
-      .then(({ svg }) => {
+
+    const run = async () => {
+      try {
+        // Validate first (suppressErrors) so an invalid diagram never reaches
+        // render(), which injects its own "bomb" error graphic into the page
+        // and leaves it orphaned in the DOM.
+        const ok = await mermaid.parse(code, { suppressErrors: true });
+        if (!ok) {
+          if (active) setError("Syntax error in diagram");
+          return;
+        }
+        const { svg } = await mermaid.render(id, code);
         if (active && hostRef.current) {
           hostRef.current.innerHTML = svg;
           setError(null);
         }
-      })
-      .catch((e: unknown) => {
+      } catch (e: unknown) {
         if (active) setError(e instanceof Error ? e.message : String(e));
-      });
+        // Defensive: drop any temp node a thrown render() may have left behind.
+        document.getElementById(id)?.remove();
+        document.getElementById(`d${id}`)?.remove();
+      }
+    };
+    void run();
+
     return () => {
       active = false;
     };
