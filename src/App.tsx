@@ -15,6 +15,7 @@ import {
   onNoteChanged,
   pickVault,
   readNote,
+  refreshTree,
   renameNote,
   saveClipboardImage,
   saveNote,
@@ -106,15 +107,23 @@ export function App() {
     }
   }, []);
 
-  // Keep the link-target snapshot fresh: load it when a vault opens and refresh
-  // whenever the index changes (create/edit/delete/rename, in-app or external).
+  // Keep the link-target snapshot AND the file tree fresh: load on vault open and
+  // refresh whenever the index changes (create/edit/delete/rename, in-app or
+  // external — the watcher drives `index://updated`). Keyed on the vault root, not
+  // the whole `vault` object, so refreshing the tree below doesn't re-subscribe.
+  const vaultRoot = vault?.root ?? null;
   useEffect(() => {
-    if (!vault) return;
+    if (!vaultRoot) return;
     let active = true;
     const load = () => {
       listLinkTargets()
         .then((t) => {
           if (active) setTargets(t);
+        })
+        .catch(() => {});
+      refreshTree()
+        .then((tree) => {
+          if (active) setVault((v) => (v ? { ...v, tree } : v));
         })
         .catch(() => {});
     };
@@ -124,7 +133,7 @@ export function App() {
       active = false;
       void unlisten.then((off) => off());
     };
-  }, [vault]);
+  }, [vaultRoot]);
 
   const handleNavigate = useCallback(
     (path: string) => {
