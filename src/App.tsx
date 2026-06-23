@@ -54,6 +54,10 @@ export function App() {
   // A pending external change to the open note that needs the user's decision
   // (the no-blind-clobber prompt). `removed` distinguishes a delete/move.
   const [conflict, setConflict] = useState<{ removed: boolean } | null>(null);
+  // Bumped only when the open note is reloaded from disk (external change), to
+  // force the editor to remount with the new content. Not bumped on save or
+  // typing, so those keep the cursor/undo history intact.
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   const previewContent = useDebounced(open?.note.content ?? "", 200);
 
@@ -209,6 +213,7 @@ export function App() {
       setOpen({ path: cur.path, note });
       setDirty(false);
       setConflict(null);
+      setReloadNonce((n) => n + 1);
       setStatus("Reloaded from disk");
     } catch (e) {
       setError(String(e));
@@ -242,6 +247,7 @@ export function App() {
       setOpen({ path: cur.path, note });
       setDirty(false);
       setConflict(null);
+      setReloadNonce((n) => n + 1);
       setStatus("Reloaded (changed on disk)");
     } catch (e) {
       setError(String(e));
@@ -416,7 +422,7 @@ export function App() {
                 </div>
                 <div className={showPreview ? "split split-both" : "split"}>
                   <Editor
-                    key={open.path}
+                    key={`${open.path}::${reloadNonce}`}
                     doc={open.note.content}
                     onChange={handleChange}
                     onPasteImage={handlePasteImage}
