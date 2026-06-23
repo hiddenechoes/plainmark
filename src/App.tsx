@@ -400,6 +400,11 @@ export function App() {
                   <span className="spacer" />
                   {dirty && <span className="dirty">● unsaved</span>}
                   {!dirty && status && <span className="saved">{status}</span>}
+                  {!renaming && (
+                    <button type="button" onClick={startRename}>
+                      Rename
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="preview-toggle"
