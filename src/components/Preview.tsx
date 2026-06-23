@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
+import remarkBreaks from "remark-breaks";
 import remarkFrontmatter from "remark-frontmatter";
 import rehypeKatex from "rehype-katex";
 // Bundled KaTeX stylesheet + fonts — never loaded from a CDN (SPEC §8.7).
@@ -152,6 +153,9 @@ export function Preview({
               remarkPlugins={[
                 remarkFrontmatter,
                 remarkGfm,
+                // Obsidian-style: a single newline is a line break, not a space
+                // (CommonMark would otherwise reflow consecutive lines together).
+                remarkBreaks,
                 remarkMath,
                 remarkWikiEmbed,
                 remarkWikiLink,

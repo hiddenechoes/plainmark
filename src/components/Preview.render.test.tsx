@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
+import remarkBreaks from "remark-breaks";
 import remarkFrontmatter from "remark-frontmatter";
 import rehypeKatex from "rehype-katex";
 import { remarkWikiEmbed } from "../lib/markdown/remarkWikiEmbed";
@@ -12,7 +13,7 @@ import { remarkWikiEmbed } from "../lib/markdown/remarkWikiEmbed";
 function render(md: string): string {
   return renderToStaticMarkup(
     <Markdown
-      remarkPlugins={[remarkFrontmatter, remarkGfm, remarkMath, remarkWikiEmbed]}
+      remarkPlugins={[remarkFrontmatter, remarkGfm, remarkBreaks, remarkMath, remarkWikiEmbed]}
       rehypePlugins={[rehypeKatex]}
     >
       {md}
@@ -43,6 +44,11 @@ describe("markdown render pipeline", () => {
     expect(html).toContain('type="checkbox"');
     expect(html).toContain("checked");
     expect(html).toContain("data-footnotes");
+  });
+
+  it("renders single newlines as line breaks (Obsidian-style)", () => {
+    const html = render("first line\nsecond line");
+    expect(html).toContain("<br");
   });
 
   it("renders inline and block math via bundled KaTeX", () => {
