@@ -122,6 +122,24 @@ For each of native-local, native-OneDrive, native-SMB, poll-SMB: did
 create/modify/rename/delete fire? Latency? Any missed events? Any unexpected
 hydration? Drop the results back into this file under a "Field results" heading.
 
+## Field results (2026-06-24, Windows)
+
+First real-hardware run, on the `v0.0.0-phase2.3` build:
+
+- **OneDrive-synced vault, `watchMode: auto` (native):** create / modify / rename
+  / delete all fired and were reflected (file tree, preview, backlinks) within a
+  second or two, no manual refresh. External edit of the open note reloaded
+  correctly. No mass hydration observed.
+- **SMB share, default settings (`auto` = native):** create / modify / rename /
+  delete all worked correctly with native events — the polling fallback was not
+  needed for this share. (Native over SMB is environment-dependent; poll remains
+  the escape hatch for shares where native doesn't fire — see below.)
+
+Net: the §13 OneDrive/SMB watcher risk is validated for these environments with
+default settings. Two UI-wiring bugs found and fixed during this pass (the editor
+not remounting on external reload; the file tree not auto-refreshing on index
+updates) — both were frontend gaps, not watcher-reliability problems.
+
 ## Recommendations (current)
 
 - **Local disk / typical OneDrive:** `watchMode: "auto"` (native).
