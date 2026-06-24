@@ -4,6 +4,7 @@ import { EditorView } from "@codemirror/view";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { createEditorExtensions } from "../lib/editor/setup";
 import { isImagePath } from "../lib/image";
+import type { NoteMeta } from "../lib/tauri";
 
 interface EditorProps {
   /** Initial document. The editor is remounted (via React `key`) per file, so
@@ -16,23 +17,40 @@ interface EditorProps {
   /** Copy a dropped image file (absolute source path) into the vault; resolves
    * to the vault-relative path to embed. */
   onImportImage?: (sourcePath: string) => Promise<string>;
+  /** Live note snapshot for `[[` autocomplete (read on demand, so updates don't
+   * re-create the editor). */
+  linkTargets?: NoteMeta[];
   /** Surface a backend error (e.g. an image write that failed). */
   onError?: (message: string) => void;
 }
 
-export function Editor({ doc, onChange, onPasteImage, onImportImage, onError }: EditorProps) {
+export function Editor({
+  doc,
+  onChange,
+  onPasteImage,
+  onImportImage,
+  linkTargets,
+  onError,
+}: EditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   // Capture the initial doc and keep the latest callbacks without re-creating
   // the editor (which would reset the cursor on every keystroke).
   const initialDocRef = useRef(doc);
   const onChangeRef = useRef(onChange);
-  onChangeRef.current = onChange;
   const onPasteImageRef = useRef(onPasteImage);
-  onPasteImageRef.current = onPasteImage;
   const onImportImageRef = useRef(onImportImage);
-  onImportImageRef.current = onImportImage;
+  const linkTargetsRef = useRef(linkTargets);
   const onErrorRef = useRef(onError);
-  onErrorRef.current = onError;
+  // Keep the latest callbacks in refs without re-creating the editor. Writing
+  // refs in an effect (rather than during render) runs after every render and
+  // before any editor event handler can read them.
+  useEffect(() => {
+    onChangeRef.current = onChange;
+    onPasteImageRef.current = onPasteImage;
+    onImportImageRef.current = onImportImage;
+    linkTargetsRef.current = linkTargets;
+    onErrorRef.current = onError;
+  });
 
   useEffect(() => {
     const host = hostRef.current;
@@ -62,7 +80,13 @@ export function Editor({ doc, onChange, onPasteImage, onImportImage, onError }: 
     const view = new EditorView({
       state: EditorState.create({
         doc: initialDocRef.current,
-        extensions: [...createEditorExtensions((d) => onChangeRef.current(d)), pasteHandler],
+        extensions: [
+          ...createEditorExtensions(
+            (d) => onChangeRef.current(d),
+            () => linkTargetsRef.current ?? [],
+          ),
+          pasteHandler,
+        ],
       }),
       parent: host,
     });

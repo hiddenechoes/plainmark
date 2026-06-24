@@ -2,14 +2,19 @@ import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
+import remarkBreaks from "remark-breaks";
 import remarkFrontmatter from "remark-frontmatter";
 import rehypeKatex from "rehype-katex";
 // Bundled KaTeX stylesheet + fonts — never loaded from a CDN (SPEC §8.7).
 import "katex/dist/katex.min.css";
 import { remarkWikiEmbed } from "../lib/markdown/remarkWikiEmbed";
+import { remarkWikiLink } from "../lib/markdown/remarkWikiLink";
 import { resolveImagePath, type PreviewLocation } from "../lib/markdown/resolveImage";
-import { dirname } from "../lib/path";
-import { readImage } from "../lib/tauri";
+import { createResolver } from "../lib/links/resolve";
+import { dirname, relativeTo } from "../lib/path";
+import { readImage, type NoteMeta } from "../lib/tauri";
+import { LinkContext, type LinkContextValue } from "../lib/links/context";
+import { WikiLink } from "./WikiLink";
 import { Mermaid } from "./Mermaid";
 
 // Where the previewed note lives, so image references resolve correctly. Held
@@ -22,52 +27,63 @@ const imageCache = new Map<string, string>();
 
 function PreviewImage({ src, alt, isWiki }: { src: string; alt: string; isWiki: boolean }) {
   const loc = useContext(LocationContext);
-  const [dataUrl, setDataUrl] = useState<string | null>(() =>
-    src.startsWith("data:") ? src : null,
+  // Data URLs are self-contained, and remote URLs are never fetched (offline
+  // guarantee), so both outcomes derive from the props during render. Only a
+  // resolvable vault path needs an async load from the backend.
+  const isData = src.startsWith("data:");
+  const abs = useMemo(
+    () => (isData || !loc ? null : resolveImagePath(loc, src, isWiki)),
+    [isData, loc, src, isWiki],
   );
-  const [failed, setFailed] = useState(false);
+  // The cache is a plain module-level Map, so a hit is read during render — no
+  // effect or extra state needed.
+  const cachedUrl = abs ? (imageCache.get(abs) ?? null) : null;
+  // Async load outcome, tagged with the `abs` it belongs to so a result from a
+  // previous image is ignored once `src` changes (a null url means it failed).
+  const [loaded, setLoaded] = useState<{ abs: string; url: string | null } | null>(null);
 
   useEffect(() => {
-    if (src.startsWith("data:")) {
-      setDataUrl(src);
-      return;
-    }
-    if (!loc) return;
-    const abs = resolveImagePath(loc, src, isWiki);
-    if (!abs) {
-      // Remote URLs and the like are not fetched (offline guarantee).
-      setFailed(true);
-      return;
-    }
-    const cached = imageCache.get(abs);
-    if (cached) {
-      setDataUrl(cached);
-      setFailed(false);
-      return;
-    }
+    if (!abs || imageCache.has(abs)) return;
     let active = true;
     readImage(abs)
       .then((url) => {
         if (!active) return;
         imageCache.set(abs, url);
-        setDataUrl(url);
-        setFailed(false);
+        setLoaded({ abs, url });
       })
       .catch(() => {
-        if (active) setFailed(true);
+        if (active) setLoaded({ abs, url: null });
       });
     return () => {
       active = false;
     };
-  }, [src, isWiki, loc]);
+  }, [abs]);
 
-  if (failed || !dataUrl) {
+  const dataUrl = isData ? src : (cachedUrl ?? (loaded?.abs === abs ? loaded.url : null));
+  if (!dataUrl) {
+    // Covers not-yet-loaded, load failures, and unresolvable refs such as
+    // remote URLs (never fetched — offline guarantee).
     return <span className="img-missing">{alt || src}</span>;
   }
   return <img className="preview-img" src={dataUrl} alt={alt} />;
 }
 
 const components: Components = {
+  // Wiki links are emitted by remarkWikiLink as `<a data-wikilink>`; render them
+  // via WikiLink (which resolves against the index). Real links fall through.
+  a({ node, href, children }) {
+    const props = node?.properties;
+    if (props && props["data-wikilink"]) {
+      const target = typeof props["data-target"] === "string" ? props["data-target"] : "";
+      const heading = typeof props["data-heading"] === "string" ? props["data-heading"] : "";
+      return (
+        <WikiLink target={target} heading={heading === "" ? null : heading}>
+          {children}
+        </WikiLink>
+      );
+    }
+    return <a href={typeof href === "string" ? href : undefined}>{children}</a>;
+  },
   img({ node, src, alt }) {
     const isWiki = node?.properties?.["data-embed"] === "wiki";
     return (
@@ -99,27 +115,58 @@ interface PreviewProps {
   content: string;
   vaultRoot: string;
   notePath: string;
+  /** Link-target snapshot for resolving `[[wikilinks]]`. */
+  targets?: NoteMeta[];
+  /** Navigate to a note (by absolute path) when a resolved link is clicked. */
+  onNavigate?: (path: string) => void;
+  /** Create (or open) a note when an unresolved link is clicked. */
+  onCreate?: (target: string) => void;
 }
+
+const noop = () => {};
 
 /** Split-pane rendered Markdown view (SPEC §8.1 split preview). Raw HTML is not
  * passed through (no `rehype-raw`), so injected markup is escaped, not executed. */
-export function Preview({ content, vaultRoot, notePath }: PreviewProps) {
+export function Preview({
+  content,
+  vaultRoot,
+  notePath,
+  targets = [],
+  onNavigate = noop,
+  onCreate = noop,
+}: PreviewProps) {
   const loc = useMemo<PreviewLocation>(
     () => ({ vaultRoot, noteDir: dirname(notePath) }),
     [vaultRoot, notePath],
   );
+  const linkCtx = useMemo<LinkContextValue>(() => {
+    const fromRel = relativeTo(vaultRoot, notePath).replace(/\\/g, "/");
+    return { resolver: createResolver(targets), fromRel, onNavigate, onCreate };
+  }, [vaultRoot, notePath, targets, onNavigate, onCreate]);
+
   return (
     <div className="preview-pane">
       <div className="preview-content">
-        <LocationContext.Provider value={loc}>
-          <Markdown
-            remarkPlugins={[remarkFrontmatter, remarkGfm, remarkMath, remarkWikiEmbed]}
-            rehypePlugins={[rehypeKatex]}
-            components={components}
-          >
-            {content}
-          </Markdown>
-        </LocationContext.Provider>
+        <LinkContext.Provider value={linkCtx}>
+          <LocationContext.Provider value={loc}>
+            <Markdown
+              remarkPlugins={[
+                remarkFrontmatter,
+                remarkGfm,
+                // Obsidian-style: a single newline is a line break, not a space
+                // (CommonMark would otherwise reflow consecutive lines together).
+                remarkBreaks,
+                remarkMath,
+                remarkWikiEmbed,
+                remarkWikiLink,
+              ]}
+              rehypePlugins={[rehypeKatex]}
+              components={components}
+            >
+              {content}
+            </Markdown>
+          </LocationContext.Provider>
+        </LinkContext.Provider>
       </div>
     </div>
   );

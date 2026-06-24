@@ -10,7 +10,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Component, Path, PathBuf};
 
 use base64::Engine as _;
@@ -23,6 +23,8 @@ const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 
 /// A note loaded for editing. `content` is LF-normalized for CodeMirror; `eol`
 /// and `bom` record the on-disk style so a save restores the exact bytes.
+/// `token` is a hash of the exact on-disk bytes at read time, used for the
+/// no-blind-clobber check on save (SPEC §7.1).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteFile {
@@ -30,6 +32,38 @@ pub struct NoteFile {
     /// `"lf"` or `"crlf"`.
     pub eol: String,
     pub bom: bool,
+    pub token: String,
+}
+
+/// Hash of raw file bytes — an optimistic-concurrency token. Cheap and stable;
+/// any byte change (including EOL/BOM) changes it.
+fn content_hash(bytes: &[u8]) -> String {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// The current on-disk token for `path`, or `None` if the file doesn't exist.
+pub fn content_token(path: &Path) -> AppResult<Option<String>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(content_hash(&bytes))),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Refuse to overwrite a file that changed on disk since it was read (SPEC §7.1
+/// no-blind-clobber). A missing file is allowed (a save recreates it — nothing to
+/// lose); `base_token == None` skips the check (e.g. a brand-new file).
+pub fn guard_unchanged(path: &Path, base_token: Option<&str>) -> AppResult<()> {
+    if let Some(base) = base_token {
+        if let Some(current) = content_token(path)? {
+            if current != base {
+                return Err(AppError::ChangedOnDisk(path.display().to_string()));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// One entry in the file tree. Directories carry `children`; files don't.
@@ -99,12 +133,15 @@ pub fn read_note(path: &Path) -> AppResult<NoteFile> {
         content,
         eol: eol.to_string(),
         bom,
+        token: content_hash(&raw),
     })
 }
 
 /// Save editor `content` (LF-normalized) back to disk, restoring the original
-/// `eol` style and `bom` so only the intended text changes (SPEC §7.1).
-pub fn save_note(path: &Path, content: &str, eol: &str, bom: bool) -> AppResult<()> {
+/// `eol` style and `bom` so only the intended text changes (SPEC §7.1). Returns
+/// the new on-disk token, so the editor can refresh it and a subsequent save
+/// doesn't wrongly trip the no-blind-clobber guard.
+pub fn save_note(path: &Path, content: &str, eol: &str, bom: bool) -> AppResult<String> {
     let normalized = content.replace("\r\n", "\n");
     let bodied = if eol == "crlf" {
         normalized.replace('\n', "\r\n")
@@ -119,7 +156,7 @@ pub fn save_note(path: &Path, content: &str, eol: &str, bom: bool) -> AppResult<
     bytes.extend_from_slice(bodied.as_bytes());
 
     atomic_write(path, &bytes)?;
-    Ok(())
+    Ok(content_hash(&bytes))
 }
 
 /// Vault-local settings (`.plainmark/settings.json`). Phase 1 only reads the
@@ -312,6 +349,33 @@ fn has_md_extension(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Recursively collect every `.md` file under `root`, skipping hidden entries
+/// (`.plainmark/`, `.git/`, …) the same way [`build_tree`] does. Used by the
+/// indexer to build the link graph on vault open.
+pub fn list_md_files(root: &Path) -> AppResult<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    collect_md_files(root, &mut out)?;
+    Ok(out)
+}
+
+fn collect_md_files(dir: &Path, out: &mut Vec<PathBuf>) -> AppResult<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_md_files(&path, out)?;
+        } else if file_type.is_file() && has_md_extension(&path) {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
 /// Ensure `target` resolves to a location inside `vault`, defending against
 /// `..` traversal. Returns the canonical path to use. Works for both existing
 /// files and not-yet-created files (canonicalizes the nearest existing parent).
@@ -451,6 +515,37 @@ mod tests {
 
         save_note(&path, "a\nb\nc\n", &note.eol, note.bom).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"a\nb\nc\n");
+    }
+
+    // §7.1 no-blind-clobber: a save is allowed when the on-disk bytes still match
+    // the token from read time, and rejected once the file changed underneath.
+    #[test]
+    fn guard_unchanged_allows_matching_token_and_rejects_changed() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        fs::write(&path, b"original\n").unwrap();
+        let note = read_note(&path).unwrap();
+
+        // Unchanged on disk → save allowed.
+        assert!(guard_unchanged(&path, Some(&note.token)).is_ok());
+
+        // Someone else writes the file → token differs → reject.
+        fs::write(&path, b"changed by someone else\n").unwrap();
+        assert!(matches!(
+            guard_unchanged(&path, Some(&note.token)),
+            Err(AppError::ChangedOnDisk(_))
+        ));
+
+        // No base token → check skipped (force).
+        assert!(guard_unchanged(&path, None).is_ok());
+    }
+
+    #[test]
+    fn guard_unchanged_allows_recreating_a_deleted_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("gone.md");
+        // A stale token but the file is missing → recreating loses nothing.
+        assert!(guard_unchanged(&path, Some("deadbeefdeadbeef")).is_ok());
     }
 
     #[test]
