@@ -159,29 +159,68 @@ pub fn save_note(path: &Path, content: &str, eol: &str, bom: bool) -> AppResult<
     Ok(content_hash(&bytes))
 }
 
-/// Vault-local settings (`.plainmark/settings.json`). Phase 1 only reads the
-/// attachments folder; the settings UI and the rest of these keys arrive later
-/// (SPEC §7, Phase 5). A missing or corrupt file falls back to defaults.
+/// Vault-local settings (`.plainmark/settings.json`). Phase 1 reads the
+/// attachments folder; Phase 3 adds the daily-note keys. These remain read-only
+/// until the settings UI lands (SPEC §7, Phase 5). A missing or corrupt file
+/// falls back to defaults.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct VaultSettings {
+pub(crate) struct VaultSettings {
     #[serde(default = "default_attachments_dir")]
-    attachments_dir: String,
+    pub attachments_dir: String,
+    #[serde(default)]
+    pub daily_notes: DailyNotesSettings,
+}
+
+/// Daily-note configuration (SPEC §8.3). `folder` and `template_path` are
+/// validated to stay vault-relative before use; see [`safe_vault_rel`].
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DailyNotesSettings {
+    #[serde(default = "default_daily_folder")]
+    pub folder: String,
+    #[serde(default = "default_daily_format")]
+    pub filename_format: String,
+    #[serde(default = "default_daily_template")]
+    pub template_path: String,
 }
 
 fn default_attachments_dir() -> String {
     "Attachments".to_string()
 }
 
+pub(crate) fn default_daily_folder() -> String {
+    "Daily".to_string()
+}
+
+fn default_daily_format() -> String {
+    "YYYY-MM-DD".to_string()
+}
+
+fn default_daily_template() -> String {
+    "Templates/Daily.md".to_string()
+}
+
 impl Default for VaultSettings {
     fn default() -> Self {
         Self {
             attachments_dir: default_attachments_dir(),
+            daily_notes: DailyNotesSettings::default(),
         }
     }
 }
 
-fn load_vault_settings(vault_root: &Path) -> VaultSettings {
+impl Default for DailyNotesSettings {
+    fn default() -> Self {
+        Self {
+            folder: default_daily_folder(),
+            filename_format: default_daily_format(),
+            template_path: default_daily_template(),
+        }
+    }
+}
+
+pub(crate) fn load_vault_settings(vault_root: &Path) -> VaultSettings {
     let path = vault_root.join(".plainmark").join("settings.json");
     match fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
@@ -197,20 +236,25 @@ pub struct SavedAttachment {
     pub relative_path: String,
 }
 
-/// Restrict a configured attachments folder to a *relative* subpath of the
-/// vault — reject absolute paths and any `..`/`.`/root component so a hostile
-/// `.plainmark/settings.json` can't redirect writes outside the vault.
-fn safe_subdir(name: &str) -> String {
-    let trimmed = name.trim();
-    let all_normal = !trimmed.is_empty()
-        && Path::new(trimmed)
+/// Normalize a configured folder/file path and confirm it stays *relative* to
+/// the vault: reject absolute paths and any `..`/`.`/root component so a hostile
+/// `.plainmark/settings.json` can't redirect reads or writes outside the vault.
+/// Backslashes are normalized to `/` *before* the component check, so a
+/// Windows-style `..\escape` can't sneak through on a Unix host. Returns the
+/// forward-slash form, or `None` if the path escapes.
+pub(crate) fn safe_vault_rel(name: &str) -> Option<String> {
+    let normalized = name.trim().replace('\\', "/");
+    let all_normal = !normalized.is_empty()
+        && Path::new(&normalized)
             .components()
             .all(|c| matches!(c, Component::Normal(_)));
-    if all_normal {
-        trimmed.replace('\\', "/")
-    } else {
-        default_attachments_dir()
-    }
+    all_normal.then_some(normalized)
+}
+
+/// Restrict a configured attachments folder to a *relative* subpath of the
+/// vault, falling back to the default folder if it would escape.
+fn safe_subdir(name: &str) -> String {
+    safe_vault_rel(name).unwrap_or_else(default_attachments_dir)
 }
 
 /// Reduce an extension to a safe lowercase alphanumeric token, defaulting to

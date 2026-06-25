@@ -57,6 +57,17 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* Push the path to the right edge, past the daily-note controls. */
+  margin-left: auto;
+}
+
+.daily-date {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font: inherit;
 }
 
 button {

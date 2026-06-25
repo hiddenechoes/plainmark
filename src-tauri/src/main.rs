@@ -8,6 +8,7 @@
 
 mod cache;
 mod config;
+mod daily;
 mod error;
 mod fs_ops;
 mod index;
@@ -332,6 +333,43 @@ fn create_note(
     Ok(abs.to_string_lossy().to_string())
 }
 
+/// Open today's daily note, creating it from the template on first use that day
+/// (SPEC §8.3). `year`/`month`/`day` are the user's *local* calendar date,
+/// resolved by the frontend; the backend never reads a wall clock, so the date
+/// stays correct near midnight. Returns the note's absolute path. Re-invoking the
+/// same day opens the existing file untouched (the template is applied on
+/// creation only).
+#[tauri::command]
+fn open_daily_note(
+    app: tauri::AppHandle,
+    year: i32,
+    month: u32,
+    day: u32,
+    state: State<'_, VaultState>,
+) -> AppResult<String> {
+    let root = vault_root(&state)?;
+    let note = daily::open_or_create_daily(&root, daily::LocalDate { year, month, day })?;
+
+    if note.created {
+        // Mirror create_note: fold the new file into the live index immediately
+        // so the tree/snapshot show it without waiting for the watcher (the
+        // watcher's later event is harmless — insert is idempotent).
+        if let Some(rel) = index::to_rel(&root, &note.abs_path) {
+            let (mtime, size) = index::file_stat(&note.abs_path);
+            if let Ok(parsed) = fs_ops::read_note(&note.abs_path) {
+                let mut idx = state
+                    .index
+                    .write()
+                    .map_err(|_| AppError::Io("index lock poisoned".into()))?;
+                idx.insert(index::build_entry(rel, mtime, size, &parsed.content));
+            }
+        }
+        let _ = app.emit("index://updated", ());
+    }
+
+    Ok(note.abs_path.to_string_lossy().to_string())
+}
+
 /// Rename or move a note, rewriting inbound `[[links]]` across the vault
 /// atomically (SPEC §8.2 + §7.1). `new_path` is absolute; it must be inside the
 /// vault and must not already exist (no clobber). Returns the new absolute path.
@@ -555,7 +593,8 @@ fn main() {
             list_link_targets,
             backlinks,
             create_note,
-            rename_note
+            rename_note,
+            open_daily_note
         ])
         .run(tauri::generate_context!())
         .expect("error while running the plainmark application");
