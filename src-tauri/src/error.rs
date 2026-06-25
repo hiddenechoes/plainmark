@@ -19,6 +19,12 @@ pub enum AppError {
     /// this marker to prompt the user instead of silently losing data.
     #[error("changed-on-disk: {0}")]
     ChangedOnDisk(String),
+    /// A task write-back target no longer matches the expected task (the line
+    /// shifted or its text changed since indexing). The toggle is refused so a
+    /// stale query never edits the wrong line (SPEC §7.1 precise targeting); the
+    /// frontend surfaces this and the live results refresh.
+    #[error("task-mismatch: {0}")]
+    TaskMismatch(String),
 }
 
 impl From<std::io::Error> for AppError {
