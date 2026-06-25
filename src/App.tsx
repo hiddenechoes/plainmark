@@ -3,6 +3,7 @@ import { BacklinksPanel } from "./components/BacklinksPanel";
 import { Editor } from "./components/Editor";
 import { FileTree } from "./components/FileTree";
 import { Preview } from "./components/Preview";
+import { today, parseDateInput, toDateInputValue, type LocalDate } from "./lib/dailyNote";
 import { decideExternalChange } from "./lib/externalChange";
 import { basename, dirname, joinPath, relativeTo } from "./lib/path";
 import {
@@ -13,6 +14,7 @@ import {
   loadLastVault,
   onIndexUpdated,
   onNoteChanged,
+  openDailyNote,
   pickVault,
   readNote,
   refreshTree,
@@ -189,6 +191,25 @@ export function App() {
     [handleSelect],
   );
 
+  // Open today's daily note (or a specific date via the date picker), creating
+  // it from the template on first use that day (§8.3). "Today" is resolved in
+  // local time here; the backend creates-or-opens idempotently.
+  const handleOpenDaily = useCallback(
+    (date?: LocalDate) => {
+      void (async () => {
+        setError(null);
+        try {
+          const d = date ?? today();
+          const path = await openDailyNote(d.year, d.month, d.day);
+          await handleSelect(path);
+        } catch (e) {
+          setError(String(e));
+        }
+      })();
+    },
+    [handleSelect],
+  );
+
   const handleChange = useCallback((content: string) => {
     setOpen((prev) => (prev ? { ...prev, note: { ...prev.note, content } } : prev));
     setDirty(true);
@@ -326,6 +347,20 @@ export function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [handleSave]);
 
+  // Cmd/Ctrl+Shift+D opens today's daily note (only with a vault open). Shift
+  // avoids the browser's Cmd/Ctrl+D bookmark binding.
+  useEffect(() => {
+    if (!vault) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "d") {
+        e.preventDefault();
+        handleOpenDaily();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [vault, handleOpenDaily]);
+
   return (
     <div className="app">
       <header className="toolbar">
@@ -333,7 +368,29 @@ export function App() {
         <button type="button" onClick={() => void handleOpenVault()}>
           Open vault…
         </button>
-        {vault && <span className="vault-path">{vault.root}</span>}
+        {vault && (
+          <>
+            <button
+              type="button"
+              className="daily-button"
+              title="Open today's daily note (Ctrl/Cmd+Shift+D)"
+              onClick={() => handleOpenDaily()}
+            >
+              Today's note
+            </button>
+            <input
+              type="date"
+              className="daily-date"
+              aria-label="Open daily note for a date"
+              defaultValue={toDateInputValue(today())}
+              onChange={(e) => {
+                const d = parseDateInput(e.target.value);
+                if (d) handleOpenDaily(d);
+              }}
+            />
+            <span className="vault-path">{vault.root}</span>
+          </>
+        )}
       </header>
 
       {error && (

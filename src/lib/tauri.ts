@@ -149,6 +149,15 @@ export function createNote(target: string): Promise<string> {
   return invoke<string>("create_note", { target });
 }
 
+/** Open (creating on first use that day) the daily note for a *local* calendar
+ * date. The frontend resolves "today" in local time and passes the components;
+ * the backend never reads a clock, so the date is correct near midnight. The
+ * template is applied on creation only — re-invoking the same day returns the
+ * existing file untouched. Returns the note's absolute path. */
+export function openDailyNote(year: number, month: number, day: number): Promise<string> {
+  return invoke<string>("open_daily_note", { year, month, day });
+}
+
 /** A filesystem change to a note, pushed by the Rust watcher (SPEC §4.1). */
 export type NoteChange =
   | { kind: "created"; path: string }
