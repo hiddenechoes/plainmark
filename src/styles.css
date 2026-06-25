@@ -80,6 +80,21 @@ button:hover {
   white-space: pre-wrap;
 }
 
+/* "Changed underneath you" prompt (SPEC §4.1 / §7.1 no-blind-clobber). */
+.banner.conflict {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #3a311d;
+  color: #e6c982;
+  border-bottom: 1px solid var(--border);
+}
+
+.banner.conflict .spacer {
+  flex: 1;
+}
+
 .empty-state {
   flex: 1;
   display: flex;
@@ -103,6 +118,83 @@ button:hover {
   padding: 8px;
   background: var(--bg-side);
   border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+
+/* Backlinks / linked-mentions panel (SPEC §8.2). */
+.backlinks-panel {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.panel-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-dim);
+}
+
+.panel-count {
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--bg-elev);
+  color: var(--fg-dim);
+  font-size: 10px;
+}
+
+.panel-empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.backlinks-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.backlink-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  padding: 5px 6px;
+  margin-bottom: 2px;
+  cursor: pointer;
+  color: var(--fg);
+}
+
+.backlink-item:hover {
+  background: var(--bg-elev);
+}
+
+.backlink-source {
+  display: block;
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.backlink-line {
+  color: var(--fg-dim);
+}
+
+.backlink-snippet {
+  display: block;
+  font-size: 11px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .tree,
@@ -312,4 +404,58 @@ button:hover {
 .preview-content ul.contains-task-list {
   list-style: none;
   padding-left: 18px;
+}
+
+/* Rename control in the editor status bar. */
+.note-name {
+  background: none;
+  border: none;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+  cursor: text;
+}
+
+.note-name:hover {
+  background: var(--bg-elev);
+}
+
+.rename-input {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font: inherit;
+  min-width: 220px;
+}
+
+/* Wiki links (SPEC §8.2/§8.8): resolved → accent, clickable; unresolved →
+ * muted/dashed, click offers to create; resolved-but-missing-heading → warning. */
+.wikilink {
+  color: var(--accent);
+  text-decoration: none;
+  cursor: pointer;
+  border-bottom: 1px solid transparent;
+}
+
+.wikilink:hover {
+  border-bottom-color: var(--accent);
+}
+
+.wikilink-unresolved {
+  color: var(--fg-dim);
+  border-bottom: 1px dashed var(--fg-dim);
+}
+
+.wikilink-unresolved:hover {
+  color: var(--fg);
+  border-bottom-color: var(--fg);
+}
+
+.wikilink-bad-heading {
+  color: var(--danger);
+  border-bottom: 1px dotted var(--danger);
 }
