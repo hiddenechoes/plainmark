@@ -12,10 +12,13 @@ import { remarkWikiLink } from "../lib/markdown/remarkWikiLink";
 import { resolveImagePath, type PreviewLocation } from "../lib/markdown/resolveImage";
 import { createResolver } from "../lib/links/resolve";
 import { dirname, relativeTo } from "../lib/path";
-import { readImage, type NoteMeta } from "../lib/tauri";
+import { readImage, runQuery, type NoteMeta } from "../lib/tauri";
 import { LinkContext, type LinkContextValue } from "../lib/links/context";
+import { QueryContext, type QueryContextValue, type ToggleArgs } from "../lib/query/context";
+import { today } from "../lib/dailyNote";
 import { WikiLink } from "./WikiLink";
 import { Mermaid } from "./Mermaid";
+import { QueryBlock } from "./QueryBlock";
 
 // Where the previewed note lives, so image references resolve correctly. Held
 // in context to avoid threading it through react-markdown's component map.
@@ -100,11 +103,14 @@ const components: Components = {
     const code = node?.children?.[0];
     if (code && code.type === "element" && code.tagName === "code") {
       const classes = code.properties?.className;
-      const isMermaid = Array.isArray(classes) && classes.includes("language-mermaid");
-      if (isMermaid) {
-        const first = code.children[0];
-        const value = first && first.type === "text" ? first.value : "";
+      const first = code.children[0];
+      const value = first && first.type === "text" ? first.value : "";
+      if (Array.isArray(classes) && classes.includes("language-mermaid")) {
         return <Mermaid code={value} />;
+      }
+      // A ` ```query ` block renders a live task list (SPEC §8.5).
+      if (Array.isArray(classes) && classes.includes("language-query")) {
+        return <QueryBlock source={value} />;
       }
     }
     return <pre>{children}</pre>;
@@ -117,13 +123,19 @@ interface PreviewProps {
   notePath: string;
   /** Link-target snapshot for resolving `[[wikilinks]]`. */
   targets?: NoteMeta[];
-  /** Navigate to a note (by absolute path) when a resolved link is clicked. */
-  onNavigate?: (path: string) => void;
+  /** Navigate to a note (by absolute path) when a resolved link or a query
+   * result is clicked. `line` (1-based) is supplied by query-result links. */
+  onNavigate?: (path: string, line?: number) => void;
   /** Create (or open) a note when an unresolved link is clicked. */
   onCreate?: (target: string) => void;
+  /** Toggle a query result's checkbox in its source file. Owned by the app so it
+   * can guard the currently-open note's unsaved edits before writing (§8.5). */
+  onToggleTask?: (args: ToggleArgs) => Promise<boolean>;
 }
 
 const noop = () => {};
+const defaultToggle = (): Promise<boolean> =>
+  Promise.reject(new Error("task toggling is unavailable"));
 
 /** Split-pane rendered Markdown view (SPEC §8.1 split preview). Raw HTML is not
  * passed through (no `rehype-raw`), so injected markup is escaped, not executed. */
@@ -134,6 +146,7 @@ export function Preview({
   targets = [],
   onNavigate = noop,
   onCreate = noop,
+  onToggleTask = defaultToggle,
 }: PreviewProps) {
   const loc = useMemo<PreviewLocation>(
     () => ({ vaultRoot, noteDir: dirname(notePath) }),
@@ -143,30 +156,42 @@ export function Preview({
     const fromRel = relativeTo(vaultRoot, notePath).replace(/\\/g, "/");
     return { resolver: createResolver(targets), fromRel, onNavigate, onCreate };
   }, [vaultRoot, notePath, targets, onNavigate, onCreate]);
+  const queryCtx = useMemo<QueryContextValue>(
+    () => ({
+      // `today` is read at run time so a long-open window still uses the right
+      // local date; the backend never reads a clock (mirrors daily notes, §8.3).
+      run: (src) => runQuery(src, today()),
+      onNavigate: (path, line) => onNavigate(path, line),
+      onToggle: (args) => onToggleTask(args),
+    }),
+    [onNavigate, onToggleTask],
+  );
 
   return (
     <div className="preview-pane">
       <div className="preview-content">
-        <LinkContext.Provider value={linkCtx}>
-          <LocationContext.Provider value={loc}>
-            <Markdown
-              remarkPlugins={[
-                remarkFrontmatter,
-                remarkGfm,
-                // Obsidian-style: a single newline is a line break, not a space
-                // (CommonMark would otherwise reflow consecutive lines together).
-                remarkBreaks,
-                remarkMath,
-                remarkWikiEmbed,
-                remarkWikiLink,
-              ]}
-              rehypePlugins={[rehypeKatex]}
-              components={components}
-            >
-              {content}
-            </Markdown>
-          </LocationContext.Provider>
-        </LinkContext.Provider>
+        <QueryContext.Provider value={queryCtx}>
+          <LinkContext.Provider value={linkCtx}>
+            <LocationContext.Provider value={loc}>
+              <Markdown
+                remarkPlugins={[
+                  remarkFrontmatter,
+                  remarkGfm,
+                  // Obsidian-style: a single newline is a line break, not a space
+                  // (CommonMark would otherwise reflow consecutive lines together).
+                  remarkBreaks,
+                  remarkMath,
+                  remarkWikiEmbed,
+                  remarkWikiLink,
+                ]}
+                rehypePlugins={[rehypeKatex]}
+                components={components}
+              >
+                {content}
+              </Markdown>
+            </LocationContext.Provider>
+          </LinkContext.Provider>
+        </QueryContext.Provider>
       </div>
     </div>
   );
