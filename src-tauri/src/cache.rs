@@ -16,10 +16,11 @@ use std::path::Path;
 
 use rusqlite::{params, Connection};
 
-use crate::index::{Heading, LinkRef, NoteEntry};
+use crate::index::{Heading, LinkRef, NoteEntry, Task};
 
 /// Bump when the schema changes; a mismatch drops and recreates the tables.
-const SCHEMA_VERSION: i64 = 1;
+/// v2 added the `tasks` table and the `classification` column (SPEC §8.5, §11).
+const SCHEMA_VERSION: i64 = 2;
 
 pub struct Cache {
     conn: Connection,
@@ -61,11 +62,13 @@ impl Cache {
             "DROP TABLE IF EXISTS notes;
              DROP TABLE IF EXISTS headings;
              DROP TABLE IF EXISTS links;
+             DROP TABLE IF EXISTS tasks;
              CREATE TABLE notes (
-                 path  TEXT PRIMARY KEY,
-                 title TEXT NOT NULL,
-                 mtime INTEGER NOT NULL,
-                 size  INTEGER NOT NULL
+                 path           TEXT PRIMARY KEY,
+                 title          TEXT NOT NULL,
+                 mtime          INTEGER NOT NULL,
+                 size           INTEGER NOT NULL,
+                 classification TEXT
              );
              CREATE TABLE headings (
                  path  TEXT NOT NULL,
@@ -82,8 +85,18 @@ impl Cache {
                  line    INTEGER NOT NULL,
                  snippet TEXT NOT NULL
              );
+             CREATE TABLE tasks (
+                 path TEXT NOT NULL,
+                 ord  INTEGER NOT NULL,
+                 text TEXT NOT NULL,
+                 done INTEGER NOT NULL,
+                 due  TEXT,
+                 line INTEGER NOT NULL,
+                 tags TEXT NOT NULL
+             );
              CREATE INDEX idx_headings_path ON headings(path);
-             CREATE INDEX idx_links_path ON links(path);",
+             CREATE INDEX idx_links_path ON links(path);
+             CREATE INDEX idx_tasks_path ON tasks(path);",
         )?;
         self.conn
             .pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -96,15 +109,17 @@ impl Cache {
 
         let mut notes = self
             .conn
-            .prepare("SELECT path, title, mtime, size FROM notes")?;
+            .prepare("SELECT path, title, mtime, size, classification FROM notes")?;
         let rows = notes.query_map([], |r| {
             Ok(NoteEntry {
                 rel_path: r.get(0)?,
                 title: r.get(1)?,
                 headings: Vec::new(),
                 outgoing: Vec::new(),
+                tasks: Vec::new(),
                 mtime: r.get(2)?,
                 size: r.get::<_, i64>(3)? as u64,
+                classification: r.get(4)?,
             })
         })?;
         for row in rows {
@@ -153,6 +168,31 @@ impl Cache {
             }
         }
 
+        let mut tasks = self
+            .conn
+            .prepare("SELECT path, text, done, due, line, tags FROM tasks ORDER BY path, ord")?;
+        let trows = tasks.query_map([], |r| {
+            let tags_json: String = r.get(5)?;
+            Ok((
+                r.get::<_, String>(0)?,
+                Task {
+                    text: r.get(1)?,
+                    done: r.get::<_, i64>(2)? != 0,
+                    due: r.get(3)?,
+                    line: r.get::<_, i64>(4)? as usize,
+                    // Tags are stored as a JSON array; a corrupt value degrades to
+                    // no tags rather than failing the whole load.
+                    tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+                },
+            ))
+        })?;
+        for row in trows {
+            let (path, task) = row?;
+            if let Some(entry) = map.get_mut(&path) {
+                entry.tasks.push(task);
+            }
+        }
+
         Ok(map)
     }
 
@@ -160,14 +200,15 @@ impl Cache {
     pub fn upsert(&mut self, entry: &NoteEntry) -> rusqlite::Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT OR REPLACE INTO notes (path, title, mtime, size) VALUES (?1, ?2, ?3, ?4)",
-            params![entry.rel_path, entry.title, entry.mtime, entry.size as i64],
+            "INSERT OR REPLACE INTO notes (path, title, mtime, size, classification) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![entry.rel_path, entry.title, entry.mtime, entry.size as i64, entry.classification],
         )?;
         tx.execute(
             "DELETE FROM headings WHERE path = ?1",
             params![entry.rel_path],
         )?;
         tx.execute("DELETE FROM links WHERE path = ?1", params![entry.rel_path])?;
+        tx.execute("DELETE FROM tasks WHERE path = ?1", params![entry.rel_path])?;
         for (i, h) in entry.headings.iter().enumerate() {
             tx.execute(
                 "INSERT INTO headings (path, ord, level, text, slug) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -180,6 +221,13 @@ impl Cache {
                 params![entry.rel_path, i as i64, l.target, l.heading, l.line as i64, l.snippet],
             )?;
         }
+        for (i, t) in entry.tasks.iter().enumerate() {
+            let tags_json = serde_json::to_string(&t.tags).unwrap_or_else(|_| "[]".to_string());
+            tx.execute(
+                "INSERT INTO tasks (path, ord, text, done, due, line, tags) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![entry.rel_path, i as i64, t.text, t.done as i64, t.due, t.line as i64, tags_json],
+            )?;
+        }
         tx.commit()
     }
 
@@ -189,6 +237,7 @@ impl Cache {
         tx.execute("DELETE FROM notes WHERE path = ?1", params![rel_path])?;
         tx.execute("DELETE FROM headings WHERE path = ?1", params![rel_path])?;
         tx.execute("DELETE FROM links WHERE path = ?1", params![rel_path])?;
+        tx.execute("DELETE FROM tasks WHERE path = ?1", params![rel_path])?;
         tx.commit()
     }
 }
@@ -212,6 +261,14 @@ mod tests {
                 line: 4,
                 snippet: "see [[Other#Section]]".to_string(),
             }],
+            tasks: vec![Task {
+                text: "Ship it #work".to_string(),
+                done: false,
+                tags: vec!["work".to_string()],
+                due: Some("2026-07-01".to_string()),
+                line: 6,
+            }],
+            classification: Some("Secret".to_string()),
             mtime: 1234,
             size: 99,
         }
@@ -231,6 +288,8 @@ mod tests {
         assert_eq!(got.size, 99);
         assert_eq!(got.headings, entry.headings);
         assert_eq!(got.outgoing, entry.outgoing);
+        assert_eq!(got.tasks, entry.tasks);
+        assert_eq!(got.classification.as_deref(), Some("Secret"));
     }
 
     #[test]
@@ -241,6 +300,8 @@ mod tests {
         let mut updated = sample("Plan.md");
         updated.headings.clear();
         updated.outgoing.clear();
+        updated.tasks.clear();
+        updated.classification = None;
         updated.mtime = 5678;
         cache.upsert(&updated).unwrap();
 
@@ -249,6 +310,8 @@ mod tests {
         assert_eq!(got.mtime, 5678);
         assert!(got.headings.is_empty());
         assert!(got.outgoing.is_empty());
+        assert!(got.tasks.is_empty());
+        assert!(got.classification.is_none());
     }
 
     #[test]

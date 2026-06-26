@@ -20,6 +20,12 @@ interface EditorProps {
   /** Live note snapshot for `[[` autocomplete (read on demand, so updates don't
    * re-create the editor). */
   linkTargets?: NoteMeta[];
+  /** 1-based line to scroll to + select (e.g. opening a query result at its
+   * source line). Applied on mount and whenever `gotoNonce` changes. */
+  gotoLine?: number;
+  /** Bumped by the caller to request a jump to `gotoLine` even when the note is
+   * already open (so repeat clicks on the same line re-scroll). */
+  gotoNonce?: number;
   /** Surface a backend error (e.g. an image write that failed). */
   onError?: (message: string) => void;
 }
@@ -30,9 +36,18 @@ export function Editor({
   onPasteImage,
   onImportImage,
   linkTargets,
+  gotoLine,
+  gotoNonce,
   onError,
 }: EditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const viewRef = useRef<EditorView | null>(null);
+  // Latest goto line in a ref, so the jump effect (keyed on the nonce) reads the
+  // current target without re-running on every line change.
+  const gotoLineRef = useRef(gotoLine);
+  useEffect(() => {
+    gotoLineRef.current = gotoLine;
+  });
   // Capture the initial doc and keep the latest callbacks without re-creating
   // the editor (which would reset the cursor on every keystroke).
   const initialDocRef = useRef(doc);
@@ -90,6 +105,7 @@ export function Editor({
       }),
       parent: host,
     });
+    viewRef.current = view;
     view.focus();
 
     // Drag-drop: Tauri intercepts OS file drops at the window level, so the
@@ -118,9 +134,26 @@ export function Editor({
     return () => {
       cancelled = true;
       unlisten?.();
+      viewRef.current = null;
       view.destroy();
     };
   }, []);
+
+  // Jump to a 1-based line on mount and whenever the caller bumps `gotoNonce`.
+  // Runs after the editor-creation effect (declared above), so `viewRef` is set
+  // even on the first mount of a freshly-opened note.
+  useEffect(() => {
+    const view = viewRef.current;
+    const line = gotoLineRef.current;
+    if (!view || line == null) return;
+    const clamped = Math.min(Math.max(Math.trunc(line), 1), view.state.doc.lines);
+    const target = view.state.doc.line(clamped);
+    view.dispatch({
+      selection: { anchor: target.from },
+      effects: EditorView.scrollIntoView(target.from, { y: "center" }),
+    });
+    view.focus();
+  }, [gotoNonce]);
 
   return <div className="editor-host" ref={hostRef} />;
 }

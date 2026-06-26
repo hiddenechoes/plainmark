@@ -417,6 +417,81 @@ button:hover {
   padding-left: 18px;
 }
 
+/* ` ```query ` block results (SPEC §8.5). */
+.query-block {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 12px 0;
+  background: var(--bg-elev);
+}
+
+.query-block.query-error {
+  color: var(--danger);
+  background: #3a1d1d;
+  border-color: var(--danger);
+}
+
+.query-error-label {
+  font-weight: 600;
+}
+
+.query-toggle-error {
+  font-size: 12px;
+  color: var(--danger);
+  margin-bottom: 6px;
+}
+
+.query-empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.query-results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.query-result {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 0;
+}
+
+.query-check {
+  flex: none;
+  cursor: pointer;
+}
+
+.query-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.query-text-done {
+  color: var(--fg-dim);
+  text-decoration: line-through;
+}
+
+.query-source {
+  flex: none;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 11px;
+  color: var(--accent);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.query-source:hover {
+  text-decoration: underline;
+}
+
 /* Rename control in the editor status bar. */
 .note-name {
   background: none;

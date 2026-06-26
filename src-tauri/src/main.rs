@@ -12,6 +12,7 @@ mod daily;
 mod error;
 mod fs_ops;
 mod index;
+mod query;
 mod watcher;
 
 use std::path::{Component, Path, PathBuf};
@@ -292,6 +293,116 @@ fn backlinks(path: String, state: State<'_, VaultState>) -> AppResult<Vec<Backli
             }
         })
         .collect())
+}
+
+/// One task result for the webview's ` ```query ` block. `path` is absolute (it
+/// matches the file paths the webview already uses); `line` is 1-based.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskResult {
+    path: String,
+    rel_path: String,
+    title: String,
+    line: usize,
+    text: String,
+    done: bool,
+    due: Option<String>,
+    tags: Vec<String>,
+}
+
+/// The outcome of running a query. A grammar error is *not* a command failure:
+/// it returns `Ok` with `error` set so the preview renders an inline message
+/// instead of crashing (SPEC §8.5). `tasks` is empty when `error` is set.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QueryResponse {
+    error: Option<String>,
+    tasks: Vec<TaskResult>,
+}
+
+/// Run a ` ```query ` block against the live task index (SPEC §8.5). `year`/
+/// `month`/`day` are the user's *local* date, resolved by the frontend, so
+/// `today` / `due before today` use local time and never UTC. A malformed query
+/// returns `Ok` with `error` set (rendered inline), never an `Err`.
+#[tauri::command]
+fn run_query(
+    source: String,
+    year: i32,
+    month: u32,
+    day: u32,
+    state: State<'_, VaultState>,
+) -> AppResult<QueryResponse> {
+    let root = vault_root(&state)?;
+    let parsed = match query::parse(&source) {
+        Ok(q) => q,
+        Err(message) => {
+            return Ok(QueryResponse {
+                error: Some(message),
+                tasks: Vec::new(),
+            });
+        }
+    };
+    let today = format!("{year:04}-{month:02}-{day:02}");
+
+    let idx = state
+        .index
+        .read()
+        .map_err(|_| AppError::Io("index lock poisoned".into()))?;
+    let tasks = query::execute(&idx, &parsed, &today)
+        .into_iter()
+        .map(|h| TaskResult {
+            path: root.join(&h.rel_path).to_string_lossy().to_string(),
+            rel_path: h.rel_path,
+            title: h.title,
+            line: h.line,
+            text: h.text,
+            done: h.done,
+            due: h.due,
+            tags: h.tags,
+        })
+        .collect();
+    Ok(QueryResponse { error: None, tasks })
+}
+
+/// Toggle a task checkbox `[ ]`↔`[x]` in its source file (SPEC §8.5 write-back,
+/// §7.1 safety). The edit is line-precise and re-verified against the expected
+/// task text + status (so a shifted line is never mis-edited), atomic, and
+/// preserves the file's EOL/BOM. `expected_done` is the status the query showed;
+/// the new status is the opposite. Returns the task's new done-state.
+#[tauri::command]
+fn toggle_task(
+    app: tauri::AppHandle,
+    path: String,
+    line: usize,
+    expected_text: String,
+    expected_done: bool,
+    state: State<'_, VaultState>,
+) -> AppResult<bool> {
+    let root = vault_root(&state)?;
+    let target = resolve_in_vault(&state, &path)?;
+
+    let note = fs_ops::read_note(&target)?;
+    let (new_content, new_done) =
+        index::toggle_task_line(&note.content, line, &expected_text, expected_done)?;
+
+    // No blind clobber: refuse if the file changed since we just read it (§7.1).
+    fs_ops::guard_unchanged(&target, Some(&note.token))?;
+    fs_ops::save_note(&target, &new_content, &note.eol, note.bom)?;
+
+    // Fold the edit into the live index immediately so the query refreshes
+    // without waiting for the watcher (its later event is harmless — insert is
+    // idempotent), then notify panels.
+    if let Some(rel) = index::to_rel(&root, &target) {
+        let (mtime, size) = index::file_stat(&target);
+        let mut idx = state
+            .index
+            .write()
+            .map_err(|_| AppError::Io("index lock poisoned".into()))?;
+        idx.insert(index::build_entry(rel, mtime, size, &new_content));
+    }
+    let _ = app.emit("index://updated", ());
+
+    Ok(new_done)
 }
 
 /// Create a note for an unresolved link (click-to-create). Idempotent: returns
@@ -594,7 +705,9 @@ fn main() {
             backlinks,
             create_note,
             rename_note,
-            open_daily_note
+            open_daily_note,
+            run_query,
+            toggle_task
         ])
         .run(tauri::generate_context!())
         .expect("error while running the plainmark application");
