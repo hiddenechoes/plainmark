@@ -158,6 +158,58 @@ export function openDailyNote(year: number, month: number, day: number): Promise
   return invoke<string>("open_daily_note", { year, month, day });
 }
 
+/** One task result for a ` ```query ` block (SPEC §8.5). `path` is absolute (for
+ * navigation); `relPath` is vault-relative; `line` is 1-based. */
+export interface TaskResult {
+  path: string;
+  relPath: string;
+  title: string;
+  line: number;
+  text: string;
+  done: boolean;
+  due: string | null;
+  tags: string[];
+}
+
+/** The outcome of running a query: either an inline grammar `error` or `tasks`.
+ * A malformed query is reported here (not thrown), so the block renders a clear
+ * inline message instead of crashing the preview. */
+export interface QueryResponse {
+  error: string | null;
+  tasks: TaskResult[];
+}
+
+/** The marker (Rust `AppError::TaskMismatch`) for a write-back whose target line
+ * no longer matches the indexed task — the live results have drifted; refresh. */
+export const TASK_MISMATCH = "task-mismatch";
+
+/** Run a ` ```query ` block against the live task index. `year`/`month`/`day` are
+ * the user's *local* date so `today` is resolved in local time, never UTC. */
+export function runQuery(
+  source: string,
+  date: { year: number; month: number; day: number },
+): Promise<QueryResponse> {
+  return invoke<QueryResponse>("run_query", {
+    source,
+    year: date.year,
+    month: date.month,
+    day: date.day,
+  });
+}
+
+/** Toggle a task checkbox `[ ]`↔`[x]` in its source file (atomic, EOL/BOM-
+ * preserving, no-blind-clobber — §7.1). The edit is re-verified against the
+ * `expectedText`/`expectedDone` the query showed, so a shifted line is never
+ * mis-edited. Returns the task's new done-state. */
+export function toggleTask(
+  path: string,
+  line: number,
+  expectedText: string,
+  expectedDone: boolean,
+): Promise<boolean> {
+  return invoke<boolean>("toggle_task", { path, line, expectedText, expectedDone });
+}
+
 /** A filesystem change to a note, pushed by the Rust watcher (SPEC §4.1). */
 export type NoteChange =
   | { kind: "created"; path: string }

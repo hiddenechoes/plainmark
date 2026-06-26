@@ -21,11 +21,13 @@ import {
   renameNote,
   saveClipboardImage,
   saveNote,
+  toggleTask,
   type NoteChange,
   type NoteFile,
   type NoteMeta,
   type VaultInfo,
 } from "./lib/tauri";
+import type { ToggleArgs } from "./lib/query/context";
 import "./styles.css";
 
 interface OpenNote {
@@ -61,6 +63,10 @@ export function App() {
   // force the editor to remount with the new content. Not bumped on save or
   // typing, so those keep the cursor/undo history intact.
   const [reloadNonce, setReloadNonce] = useState(0);
+  // A pending request to scroll the editor to a 1-based line (e.g. opening a
+  // query result at its source line). `nonce` re-triggers the jump even when the
+  // same line is clicked again; `path` gates it to the note it targets.
+  const [goto, setGoto] = useState<{ path: string; line: number; nonce: number } | null>(null);
 
   const previewContent = useDebounced(open?.note.content ?? "", 200);
 
@@ -138,11 +144,27 @@ export function App() {
   }, [vaultRoot]);
 
   const handleNavigate = useCallback(
-    (path: string) => {
+    (path: string, line?: number) => {
+      if (line != null) {
+        setGoto((g) => ({ path, line, nonce: (g?.nonce ?? 0) + 1 }));
+      }
       void handleSelect(path);
     },
     [handleSelect],
   );
+
+  // Toggle a query result's checkbox in its source file. If the result lives in
+  // the currently-open note with unsaved edits, refuse rather than race the
+  // buffer against the disk write (SPEC §8.5); otherwise the backend write is
+  // atomic + re-verified, and the live results refresh on `index://updated`.
+  // Reads open/dirty from refs so the callback stays stable.
+  const handleToggleTask = useCallback((args: ToggleArgs): Promise<boolean> => {
+    const current = openRef.current;
+    if (current && current.path === args.path && dirtyRef.current) {
+      return Promise.reject(new Error("Save this note's unsaved edits before toggling its tasks."));
+    }
+    return toggleTask(args.path, args.line, args.text, args.done);
+  }, []);
 
   // Rename the open note (keeping it in the same folder). The backend rewrites
   // inbound links across the vault atomically (§8.2); we then open the new path.
@@ -494,6 +516,8 @@ export function App() {
                     onPasteImage={handlePasteImage}
                     onImportImage={handleImportImage}
                     linkTargets={targets}
+                    gotoLine={goto && goto.path === open.path ? goto.line : undefined}
+                    gotoNonce={goto?.nonce}
                     onError={setError}
                   />
                   {showPreview && (
@@ -504,6 +528,7 @@ export function App() {
                       targets={targets}
                       onNavigate={handleNavigate}
                       onCreate={handleCreate}
+                      onToggleTask={handleToggleTask}
                     />
                   )}
                 </div>

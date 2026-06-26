@@ -45,6 +45,22 @@ pub struct LinkRef {
     pub snippet: String,
 }
 
+/// One Markdown checkbox task (`- [ ]` / `- [x]`), with its inline metadata
+/// (SPEC §8.5). `text` is the full task body after the checkbox marker, trimmed —
+/// it is what write-back re-verifies against, so it must round-trip exactly.
+/// `tags` are inline `#tags` (without the `#`); `due` is an optional inline
+/// `📅 YYYY-MM-DD`. `line` is the 1-based line in the source file, for precise
+/// write-back and the result's source link.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Task {
+    pub text: String,
+    pub done: bool,
+    pub tags: Vec<String>,
+    pub due: Option<String>,
+    pub line: usize,
+}
+
 /// Everything the index knows about one note.
 #[derive(Debug, Clone)]
 pub struct NoteEntry {
@@ -54,6 +70,11 @@ pub struct NoteEntry {
     pub title: String,
     pub headings: Vec<Heading>,
     pub outgoing: Vec<LinkRef>,
+    /// Checkbox tasks in this note (SPEC §8.5).
+    pub tasks: Vec<Task>,
+    /// The frontmatter `classification:` value, if any (SPEC §11). Used by the
+    /// `classification is <Label>` query filter; not a real Purview label.
+    pub classification: Option<String>,
     /// Modification time (millis since epoch) and size, for the cache's
     /// skip-if-unchanged check.
     pub mtime: i64,
@@ -384,7 +405,7 @@ pub fn rewrite_inbound_links(
         .any(|e| e.rel_path != old_rel && stem_of(&e.rel_path).eq_ignore_ascii_case(new_stem));
     let new_bare = if ambiguous { new_path_ref } else { new_stem };
 
-    let (_, code_ranges) = headings_and_code_ranges(content);
+    let (_, code_ranges, _) = headings_and_code_ranges(content);
     let bytes = content.as_bytes();
     let mut out = String::with_capacity(content.len());
     let mut i = 0;
@@ -480,13 +501,16 @@ pub fn reindex_path(index: &mut Index, vault_root: &Path, abs: &Path) {
 
 /// Parse `content` and assemble a [`NoteEntry`] for the note at `rel`.
 pub fn build_entry(rel: String, mtime: i64, size: u64, content: &str) -> NoteEntry {
-    let (headings, outgoing) = parse_note(content);
+    let (headings, outgoing, tasks) = parse_note(content);
+    let classification = parse_frontmatter_classification(content);
     let title = stem_of(&rel).to_string();
     NoteEntry {
         rel_path: rel,
         title,
         headings,
         outgoing,
+        tasks,
+        classification,
         mtime,
         size,
     }
@@ -515,17 +539,27 @@ pub fn file_stat(path: &Path) -> (i64, u64) {
     }
 }
 
-/// Parse a note's LF-normalized `content` into its headings and outgoing links.
-/// `[[...]]` inside code spans/blocks and `![[embeds]]` are excluded.
-pub fn parse_note(content: &str) -> (Vec<Heading>, Vec<LinkRef>) {
-    let (headings, code_ranges) = headings_and_code_ranges(content);
+/// Parse a note's LF-normalized `content` into its headings, outgoing links, and
+/// tasks. `[[...]]` inside code spans/blocks and `![[embeds]]` are excluded, and
+/// task markers inside fenced code blocks are likewise skipped (pulldown-cmark
+/// only emits a task-list marker for a real list item, never inside code).
+pub fn parse_note(content: &str) -> (Vec<Heading>, Vec<LinkRef>, Vec<Task>) {
+    let (headings, code_ranges, task_markers) = headings_and_code_ranges(content);
     let links = scan_links(content, &code_ranges);
-    (headings, links)
+    let tasks = scan_tasks(content, &task_markers);
+    (headings, links, tasks)
 }
 
-/// One pulldown-cmark pass to collect heading text (+ slug + level) and the byte
-/// ranges of code spans and fenced code blocks (so links there are ignored).
-fn headings_and_code_ranges(src: &str) -> (Vec<Heading>, Vec<Range<usize>>) {
+/// Output of [`headings_and_code_ranges`]: the note's headings, the byte ranges
+/// of code spans/blocks (links there are ignored), and each GFM task-list
+/// marker as `(byte offset, checked)`.
+type NoteStructure = (Vec<Heading>, Vec<Range<usize>>, Vec<(usize, bool)>);
+
+/// One pulldown-cmark pass to collect heading text (+ slug + level), the byte
+/// ranges of code spans and fenced code blocks (so links there are ignored), and
+/// the byte offset + checked state of every GFM task-list marker (so tasks in
+/// code blocks are skipped for free).
+fn headings_and_code_ranges(src: &str) -> NoteStructure {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_FOOTNOTES);
@@ -535,11 +569,15 @@ fn headings_and_code_ranges(src: &str) -> (Vec<Heading>, Vec<Range<usize>>) {
 
     let mut headings = Vec::new();
     let mut code_ranges = Vec::new();
+    let mut task_markers: Vec<(usize, bool)> = Vec::new();
     let mut current: Option<(u8, String)> = None;
     let mut code_depth: u32 = 0;
 
     for (event, range) in Parser::new_ext(src, options).into_offset_iter() {
         match event {
+            Event::TaskListMarker(checked) => {
+                task_markers.push((range.start, checked));
+            }
             Event::Start(Tag::Heading { level, .. }) => {
                 current = Some((heading_level(level), String::new()));
             }
@@ -579,7 +617,7 @@ fn headings_and_code_ranges(src: &str) -> (Vec<Heading>, Vec<Range<usize>>) {
         }
     }
 
-    (headings, code_ranges)
+    (headings, code_ranges, task_markers)
 }
 
 fn heading_level(level: HeadingLevel) -> u8 {
@@ -654,6 +692,220 @@ fn parse_link(inner: &str, src: &str, offset: usize) -> Option<LinkRef> {
     })
 }
 
+/// Build [`Task`]s from the byte offsets of pulldown-cmark task-list markers.
+/// Each marker offset lands on a genuine task line (never inside code), so we
+/// re-parse that line for the checkbox status and body, then pull inline `#tags`
+/// and a `📅 YYYY-MM-DD` due date out of the body (SPEC §8.5).
+fn scan_tasks(src: &str, markers: &[(usize, bool)]) -> Vec<Task> {
+    let mut tasks = Vec::with_capacity(markers.len());
+    for &(offset, _checked) in markers {
+        let line = line_text(src, offset);
+        // Re-parse from the line itself rather than trusting the marker width, so
+        // the status we record is exactly what write-back will see and flip.
+        let Some((_, done, body)) = parse_task_line(line) else {
+            continue;
+        };
+        let tags = extract_tags(body);
+        let due = extract_due(body);
+        tasks.push(Task {
+            text: body.trim().to_string(),
+            done,
+            tags,
+            due,
+            line: line_of(src, offset),
+        });
+    }
+    tasks
+}
+
+/// Parse a single line as a Markdown checkbox task. Returns the byte column of
+/// the status character within the line (the one between the brackets), whether
+/// it is done, and the task body (text after the marker). Returns `None` if the
+/// line is not a `-`/`*`/`+` bullet followed by `[ ]`, `[x]`, or `[X]`.
+///
+/// Used both at index time and at write-back time, so the toggle re-verifies a
+/// line against the exact rule that indexed it.
+pub fn parse_task_line(line: &str) -> Option<(usize, bool, &str)> {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+        i += 1;
+    }
+    if i >= bytes.len() || !matches!(bytes[i], b'-' | b'*' | b'+') {
+        return None;
+    }
+    i += 1;
+    if i >= bytes.len() || !matches!(bytes[i], b' ' | b'\t') {
+        return None;
+    }
+    while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+        i += 1;
+    }
+    if i + 2 >= bytes.len() || bytes[i] != b'[' || bytes[i + 2] != b']' {
+        return None;
+    }
+    let done = match bytes[i + 1] {
+        b' ' => false,
+        b'x' | b'X' => true,
+        _ => return None,
+    };
+    let status_col = i + 1;
+    // The body starts after `]`, skipping the single conventional separator space.
+    let mut j = i + 3;
+    if j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+        j += 1;
+    }
+    Some((status_col, done, &line[j..]))
+}
+
+/// Flip a single task's checkbox in LF-normalized `content`, re-verifying that
+/// the target line still is the expected task before editing (SPEC §7.1 precise
+/// write-back). Matching the expected text + status means a line that shifted or
+/// changed under us is refused rather than mis-edited. Exactly one byte — the
+/// status character between the brackets — is changed; every other byte is
+/// preserved, so EOL/BOM and surrounding content round-trip untouched.
+///
+/// Returns the new content and the task's new done-state, or [`AppError::TaskMismatch`].
+pub fn toggle_task_line(
+    content: &str,
+    line: usize,
+    expected_text: &str,
+    expected_done: bool,
+) -> crate::error::AppResult<(String, bool)> {
+    use crate::error::AppError;
+
+    if line == 0 {
+        return Err(AppError::TaskMismatch("line numbers start at 1".into()));
+    }
+    // Walk to the start byte of the 1-based target line.
+    let mut start = 0;
+    let mut current = 1;
+    while current < line {
+        match content[start..].find('\n') {
+            Some(i) => {
+                start += i + 1;
+                current += 1;
+            }
+            None => {
+                return Err(AppError::TaskMismatch(format!(
+                    "line {line} is past the end of the file"
+                )));
+            }
+        }
+    }
+    let end = content[start..]
+        .find('\n')
+        .map(|i| start + i)
+        .unwrap_or(content.len());
+    let line_str = &content[start..end];
+
+    let (status_col, done, body) = parse_task_line(line_str)
+        .ok_or_else(|| AppError::TaskMismatch(format!("line {line} is not a task")))?;
+    if done != expected_done || body.trim() != expected_text.trim() {
+        return Err(AppError::TaskMismatch(format!(
+            "the task on line {line} changed since the query ran — refresh and try again"
+        )));
+    }
+
+    let flipped = if done { b' ' } else { b'x' };
+    let abs = start + status_col;
+    let mut bytes = content.as_bytes().to_vec();
+    bytes[abs] = flipped; // status char is ASCII (' '/'x'/'X'): a 1-byte swap.
+    let new_content = String::from_utf8(bytes)
+        .map_err(|e| AppError::Io(format!("toggle produced invalid UTF-8: {e}")))?;
+    Ok((new_content, !done))
+}
+
+/// Pull inline `#tags` from a task body (without the leading `#`). A tag starts
+/// at a `#` that is at a word boundary, runs over `[A-Za-z0-9_/-]`, and must
+/// contain at least one non-digit (so `#123` is not a tag, matching Obsidian).
+fn extract_tags(body: &str) -> Vec<String> {
+    let bytes = body.as_bytes();
+    let mut tags = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'#' {
+            let prev_is_word =
+                i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+            if !prev_is_word {
+                let start = i + 1;
+                let mut j = start;
+                while j < bytes.len()
+                    && (bytes[j].is_ascii_alphanumeric() || matches!(bytes[j], b'_' | b'-' | b'/'))
+                {
+                    j += 1;
+                }
+                let tag = &body[start..j];
+                if !tag.is_empty() && tag.bytes().any(|b| !b.is_ascii_digit()) {
+                    tags.push(tag.to_string());
+                }
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    tags
+}
+
+/// Pull an inline due date (`📅 YYYY-MM-DD`) from a task body, if present.
+fn extract_due(body: &str) -> Option<String> {
+    let idx = body.find('📅')?;
+    let rest = body[idx + '📅'.len_utf8()..].trim_start();
+    let candidate: String = rest.chars().take(10).collect();
+    if is_iso_date(&candidate) {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+/// True if `s` is exactly `YYYY-MM-DD` with plausible month/day ranges. Dates are
+/// compared lexicographically elsewhere, which matches chronological order for
+/// this fixed-width form.
+pub fn is_iso_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return false;
+    }
+    if !b.iter().enumerate().all(|(i, &c)| {
+        if i == 4 || i == 7 {
+            c == b'-'
+        } else {
+            c.is_ascii_digit()
+        }
+    }) {
+        return false;
+    }
+    let month = s[5..7].parse::<u32>().unwrap_or(0);
+    let day = s[8..10].parse::<u32>().unwrap_or(0);
+    (1..=12).contains(&month) && (1..=31).contains(&day)
+}
+
+/// Read the `classification:` value from a leading YAML frontmatter block (SPEC
+/// §11). Intentionally minimal — a line scan, not a full YAML parse — since the
+/// field is a UX marker, not a real Purview label. Returns the trimmed,
+/// unquoted value, or `None` if there is no frontmatter or no such key.
+pub fn parse_frontmatter_classification(content: &str) -> Option<String> {
+    let rest = content.strip_prefix("---\n")?;
+    let end = rest.find("\n---")?;
+    let block = &rest[..end];
+    for line in block.lines() {
+        let trimmed = line.trim();
+        if let Some(value) = trimmed
+            .strip_prefix("classification:")
+            .or_else(|| trimmed.strip_prefix("classification :"))
+        {
+            let value = value.trim().trim_matches(|c| c == '"' || c == '\'').trim();
+            if value.is_empty() {
+                return None;
+            }
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
 /// 1-based line number of byte `offset`.
 fn line_of(src: &str, offset: usize) -> usize {
     src[..offset.min(src.len())]
@@ -695,20 +947,13 @@ mod tests {
     use super::*;
 
     fn entry(rel: &str, content: &str) -> NoteEntry {
-        let (headings, outgoing) = parse_note(content);
-        NoteEntry {
-            rel_path: rel.to_string(),
-            title: stem_of(rel).to_string(),
-            headings,
-            outgoing,
-            mtime: 0,
-            size: content.len() as u64,
-        }
+        build_entry(rel.to_string(), 0, content.len() as u64, content)
     }
 
     #[test]
     fn parses_basic_links_and_headings() {
-        let (headings, links) = parse_note("# Title\n\nSee [[Other Note]] and [[Plan#Goals]].\n");
+        let (headings, links, _tasks) =
+            parse_note("# Title\n\nSee [[Other Note]] and [[Plan#Goals]].\n");
         assert_eq!(headings.len(), 1);
         assert_eq!(headings[0].text, "Title");
         assert_eq!(headings[0].slug, "title");
@@ -722,7 +967,7 @@ mod tests {
 
     #[test]
     fn ignores_embeds_and_aliases() {
-        let (_, links) = parse_note("![[image.png]] but [[Real|shown text]] counts\n");
+        let (_, links, _) = parse_note("![[image.png]] but [[Real|shown text]] counts\n");
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].target, "Real");
         // Alias is parsed off; it must not leak into the target.
@@ -733,14 +978,14 @@ mod tests {
     fn ignores_links_in_code() {
         let content =
             "Inline `[[NotALink]]` and a block:\n\n```\n[[AlsoNot]]\n```\n\n[[RealOne]]\n";
-        let (_, links) = parse_note(content);
+        let (_, links, _) = parse_note(content);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].target, "RealOne");
     }
 
     #[test]
     fn heading_slug_handles_punctuation() {
-        let (headings, _) = parse_note("## My Heading: Part 2!\n");
+        let (headings, _, _) = parse_note("## My Heading: Part 2!\n");
         assert_eq!(headings[0].slug, "my-heading-part-2");
     }
 
@@ -959,5 +1204,112 @@ mod tests {
         // Re-index B with the link removed.
         idx.insert(entry("B.md", "no links now\n"));
         assert_eq!(idx.backlinks("Target.md").len(), 0);
+    }
+
+    // ---- Tasks (SPEC §8.5) ----
+
+    #[test]
+    fn parses_task_markers_status_tags_and_due() {
+        let content = "# T\n\n- [ ] Write the spec #work #urgent 📅 2026-07-01\n- [x] Done thing\n* [X] starred done\n";
+        let (_, _, tasks) = parse_note(content);
+        assert_eq!(tasks.len(), 3);
+
+        assert_eq!(tasks[0].text, "Write the spec #work #urgent 📅 2026-07-01");
+        assert!(!tasks[0].done);
+        assert_eq!(tasks[0].tags, vec!["work", "urgent"]);
+        assert_eq!(tasks[0].due.as_deref(), Some("2026-07-01"));
+        assert_eq!(tasks[0].line, 3);
+
+        assert!(tasks[1].done);
+        assert!(tasks[1].tags.is_empty());
+        assert!(tasks[1].due.is_none());
+
+        assert!(tasks[2].done); // `* [X]` bullet + uppercase X
+    }
+
+    #[test]
+    fn tasks_inside_code_blocks_are_skipped() {
+        let content =
+            "- [ ] real\n\n```\n- [ ] fenced not a task\n```\n\n    - [ ] indented code\n";
+        let (_, _, tasks) = parse_note(content);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].text, "real");
+        assert_eq!(tasks[0].line, 1);
+    }
+
+    #[test]
+    fn frontmatter_classification_is_read() {
+        let c = "---\ntitle: X\nclassification: Secret\n---\n\n- [ ] body\n";
+        assert_eq!(
+            parse_frontmatter_classification(c).as_deref(),
+            Some("Secret")
+        );
+        // Quoted value, and no-frontmatter, and missing-key cases.
+        assert_eq!(
+            parse_frontmatter_classification("---\nclassification: \"Top Secret\"\n---\n")
+                .as_deref(),
+            Some("Top Secret")
+        );
+        assert!(parse_frontmatter_classification("no frontmatter\n").is_none());
+        assert!(parse_frontmatter_classification("---\ntitle: X\n---\n").is_none());
+    }
+
+    #[test]
+    fn digit_only_hashes_are_not_tags() {
+        let (_, _, tasks) = parse_note("- [ ] pay #123 and #work\n");
+        assert_eq!(tasks[0].tags, vec!["work"]);
+    }
+
+    #[test]
+    fn toggle_flips_open_to_done_and_back() {
+        let content = "- [ ] a\n- [ ] b\n";
+        let (flipped, done) = toggle_task_line(content, 2, "b", false).unwrap();
+        assert!(done);
+        assert_eq!(flipped, "- [ ] a\n- [x] b\n");
+
+        let (back, done) = toggle_task_line(&flipped, 2, "b", true).unwrap();
+        assert!(!done);
+        assert_eq!(back, content);
+    }
+
+    #[test]
+    fn toggle_refuses_a_shifted_or_changed_line() {
+        let content = "- [ ] a\n- [ ] b\n";
+        // The line still has a task, but its text no longer matches what the
+        // query indexed — refuse rather than edit the wrong line.
+        assert!(toggle_task_line(content, 2, "stale text", false).is_err());
+        // Wrong expected status is also a mismatch.
+        assert!(toggle_task_line(content, 1, "a", true).is_err());
+        // Not a task line / past EOF.
+        assert!(toggle_task_line("just prose\n", 1, "", false).is_err());
+        assert!(toggle_task_line(content, 9, "x", false).is_err());
+    }
+
+    #[test]
+    fn toggle_round_trips_eol_and_bom_through_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Tasks.md");
+
+        // UTF-8 BOM + CRLF, two tasks.
+        let original = {
+            let mut v = vec![0xEF, 0xBB, 0xBF];
+            v.extend_from_slice(b"# Tasks\r\n- [ ] alpha\r\n- [x] beta\r\n");
+            v
+        };
+        std::fs::write(&path, &original).unwrap();
+
+        // Read (LF-normalized), toggle line 2, save back through the atomic path.
+        let note = crate::fs_ops::read_note(&path).unwrap();
+        let (new_content, done) = toggle_task_line(&note.content, 2, "alpha", false).unwrap();
+        assert!(done);
+        crate::fs_ops::save_note(&path, &new_content, &note.eol, note.bom).unwrap();
+
+        // Only the one checkbox byte changed; BOM + CRLF preserved exactly.
+        let expected = {
+            let mut v = vec![0xEF, 0xBB, 0xBF];
+            v.extend_from_slice(b"# Tasks\r\n- [x] alpha\r\n- [x] beta\r\n");
+            v
+        };
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
     }
 }
