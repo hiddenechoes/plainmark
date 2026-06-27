@@ -23,17 +23,17 @@ serde_json = "1"
 thiserror = "2"
 base64 = "0.22"
 tauri-plugin-clipboard-manager = "2"
-png = "0.17"
+png = "0.18"
 # Phase 2: filesystem watcher (native events + polling fallback) with built-in
 # debouncing and rename-pair correlation (SPEC §13).
 notify = "8"
-notify-debouncer-full = "0.5"
+notify-debouncer-full = "0.7"
 # Phase 2: Markdown tokenization for the indexer — used to find heading and
 # code-span/code-block ranges so wiki-link scanning skips fenced code.
 pulldown-cmark = { version = "0.13", default-features = false }
 # Phase 2: rebuildable index cache. `bundled` compiles SQLite from source — no
 # system lib, no network, works in CI on all three OSes (SPEC §7).
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"
